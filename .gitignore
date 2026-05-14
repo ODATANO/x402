@@ -1,0 +1,61 @@
+# CAP x402
+_out
+*.db
+*.sqlite
+connection.properties
+default-*.json
+.cdsrc-private.json
+gen/
+node_modules/
+target/
+
+# Web IDE, App Studio
+.che/
+.gen/
+
+# MTA
+*_mta_build_tmp
+*.mtar
+mta_archives/
+
+# Other
+.DS_Store
+*.orig
+*.log
+
+*.iml
+*.flattened-pom.xml
+
+# IDEs
+# .vscode
+# .idea
+
+# @cap-js/cds-typer
+@cds-models
+
+# tsc emits next to sources (outDir: ".")
+srv/**/*.js
+srv/**/*.js.map
+srv/**/*.d.ts
+srv/**/*.d.ts.map
+test/**/*.js
+test/**/*.js.map
+test/**/*.d.ts
+
+# Test coverage
+coverage/
+
+# npm pack artifacts / vendored tarballs
+*.tgz
+
+# Build / tooling caches
+*.tsbuildinfo
+npm-debug.log*
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+
+CAP_PROJECT_GUIDE.md
+x402-cardano-integration.md

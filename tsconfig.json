@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "rootDir": ".",
+    "outDir": ".",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "noEmitOnError": true,
+    "lib": ["ES2022"],
+    "types": ["node", "jest"],
+    "paths": {
+      "#cds-models/*": ["./@cds-models/*"]
+    }
+  },
+  "include": ["srv/**/*.ts", "test/**/*.ts"],
+  "exclude": ["node_modules", "gen", "app", "**/*.test.ts"]
+}

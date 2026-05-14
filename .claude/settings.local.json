@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install *)",
+      "Bash(npx tsc *)",
+      "Bash(timeout 12 npx cds serve --no-open)",
+      "Bash(timeout 12 npx cds serve)",
+      "Bash(node *)",
+      "Bash(NODE_PRESERVE_SYMLINKS=1 timeout 15 npx cds serve)",
+      "Bash(npm pack *)",
+      "Bash(pkill -f \"cds serve\\\\|node.*cds-dk\")",
+      "Bash(npx ts-node --transpile-only -e ' *)",
+      "Bash(npx tsx -e ' *)",
+      "Bash(npx tsx *)",
+      "Bash(npx jest *)",
+      "Bash(echo \"---tsc exit: $?---\")",
+      "Bash(echo \"---build exit: $?---\")",
+      "Bash(powershell -Command 'Get-Process node -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq '\\\\''node'\\\\'' } | Stop-Process -Force')",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(git add *)",
+      "Bash(npm view *)",
+      "Bash(npm ls *)"
+    ]
+  }
+}

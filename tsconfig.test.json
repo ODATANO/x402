@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "isolatedModules": true
+  },
+  "include": ["srv/**/*.ts", "test/**/*.ts"],
+  "exclude": ["node_modules", "gen"]
+}

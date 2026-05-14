@@ -1,0 +1,23 @@
+{
+  "name": "@odatano/x402-example-cap-app",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Minimal CAP application demonstrating @odatano/x402 plugin integration.",
+  "scripts": {
+    "start": "cds-serve",
+    "watch": "cds watch"
+  },
+  "dependencies": {
+    "@odatano/x402": "*",
+    "@sap/cds": "^9",
+    "express": "^4"
+  },
+  "devDependencies": {
+    "@cap-js/sqlite": "^2"
+  },
+  "cds": {
+    "requires": {
+      "db": { "kind": "sqlite", "credentials": { "url": ":memory:" } }
+    }
+  }
+}

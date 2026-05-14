@@ -1,0 +1,34 @@
+# .npmignore — controls what ships in the published @odatano/x402 package.
+#
+# npm always keeps package.json, README.md, LICENSE and the "main" entry.
+# Everything matched below is trimmed from the published tarball.
+# (No "files" field in package.json — this file is the single source of truth.)
+
+# --- TypeScript sources & build maps: ship compiled .js + .d.ts only ---
+*.ts
+!*.d.ts
+*.d.ts.map
+*.js.map
+
+# --- Tests & coverage ---
+test/
+coverage/
+jest.config.js
+tsconfig.test.json
+
+# --- Build / tooling config ---
+tsconfig.json
+tsconfig.build.json
+eslint.config.mjs
+.vscode/
+.claude/
+
+# --- Repo docs (only README.md ships) ---
+docs/
+plan.md
+CAP_PROJECT_GUIDE.md
+x402-cardano-integration.md
+
+# --- Examples & local artifacts ---
+examples/
+*.tgz

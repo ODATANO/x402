@@ -5,6 +5,9 @@
   "license": "Apache-2.0",
   "main": "srv/index.js",
   "types": "srv/index.d.ts",
+  "publishConfig": {
+    "access": "public"
+  },
   "imports": {
     "#cds-models/*": "./@cds-models/*/index.js"
   },

@@ -88,6 +88,11 @@ export {
   httpFacilitator,
   type HttpFacilitatorConfig,
 } from './facilitator/http';
+export {
+  createFacilitatorRouter,
+  type CreateFacilitatorRouterOptions,
+  type FacilitatorServerLogger,
+} from './facilitator/server';
 
 // ─── Helpers ──────────────────────────────────────────────────────────
 export {
@@ -123,6 +128,13 @@ export type {
   AcceptsSelector,
   X402ClientOptions,
 } from './client/types';
+export {
+  X402PaymentError,
+  parseErrorCode,
+  paymentErrorFromBody,
+  type X402PaymentErrorKind,
+  type X402PaymentErrorInit,
+} from './client/errors';
 
 // ─── Bridge (lower-level: exposed for advanced consumers) ─────────────
 export * as bridge from './bridge';

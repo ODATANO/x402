@@ -9,6 +9,7 @@
  */
 
 import { x402Fetch } from '../../srv/client/fetch';
+import { X402PaymentError } from '../../srv/client/errors';
 import { decode } from '../../srv/core/decode';
 import { buildBody, signTx } from '../fixtures/build-tx';
 import {
@@ -164,12 +165,83 @@ describe('x402Fetch', () => {
     expect(second.get('PAYMENT-SIGNATURE')).toBeTruthy();
   });
 
-  it('throws when pay rejects', async () => {
+  it('wraps pay-handler errors in X402PaymentError(pay_handler_failed) with original on .cause', async () => {
     const inner = jest.fn().mockResolvedValueOnce(res402());
-    const pay  = jest.fn(async () => { throw new Error('wallet refused'); });
+    const walletError = new Error('wallet refused');
+    const pay  = jest.fn(async () => { throw walletError; });
     const paid = x402Fetch({ fetch: inner, pay });
 
-    await expect(paid('https://api.example/foo')).rejects.toThrow('wallet refused');
+    let caught: unknown;
+    try { await paid('https://api.example/foo'); }
+    catch (err) { caught = err; }
+
+    expect(caught).toBeInstanceOf(X402PaymentError);
+    const e = caught as X402PaymentError;
+    expect(e.kind).toBe('pay_handler_failed');
+    expect(e.cause).toBe(walletError);
+    expect(e.accepts).toBeDefined();
+    expect(e.message).toMatch(/wallet refused/);
+  });
+
+  it('errorOnFailure: throws X402PaymentError(retries_exhausted) after retries hit cap', async () => {
+    const errorBody = { ...REQS, error: 'payment required (wrong_recipient): nope' };
+    const inner = jest.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(errorBody), { status: 402 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(errorBody), { status: 402 }));
+    const pay = jest.fn(async () => ({ signedTxCborHex: signed.cborHex, nonceRef: NONCE_REF }));
+
+    const paid = x402Fetch({ fetch: inner, pay, maxRetries: 1, errorOnFailure: true });
+    let caught: unknown;
+    try { await paid('https://api.example/foo'); }
+    catch (err) { caught = err; }
+
+    expect(caught).toBeInstanceOf(X402PaymentError);
+    const e = caught as X402PaymentError;
+    expect(e.kind).toBe('retries_exhausted');
+    expect(e.code).toBe('wrong_recipient');
+    expect(e.serverError).toMatch(/wrong_recipient/);
+    expect(e.httpStatus).toBe(402);
+    expect(e.accepts).toHaveLength(1);
+  });
+
+  it('unwraps CAP / OData error envelope around the v2 body and pays through it', async () => {
+    // gateService (≤ v0.2) emits 402 via req.reject, which CAP wraps in
+    // its standard OData error envelope. The unwrap path should restore
+    // the v2 body so pay + retry proceeds normally.
+    const wrapped = {
+      error: {
+        message: JSON.stringify(REQS),
+        code: '402',
+        '@Common.numericSeverity': 4,
+      },
+    };
+    const inner = jest.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(wrapped), {
+        status: 402, headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(res200());
+    const pay = jest.fn(async () => ({
+      signedTxCborHex: signed.cborHex, nonceRef: NONCE_REF,
+    }));
+    const paid = x402Fetch({ fetch: inner, pay });
+
+    const res = await paid('https://api.example/foo');
+    expect(res.status).toBe(200);
+    expect(pay).toHaveBeenCalledTimes(1);
+    // The pay handler must have received the unwrapped accepts[0] entry.
+    const reqEntry = pay.mock.calls[0]![0];
+    expect(reqEntry.amount).toBe('1000000');
+    expect(reqEntry.payTo).toBe(SELLER_ADDR);
+  });
+
+  it('errorOnFailure: throws X402PaymentError(invalid_402_body) when body is not JSON', async () => {
+    const inner = jest.fn(async () => new Response('plain text', { status: 402 }));
+    const pay = jest.fn();
+    const paid = x402Fetch({ fetch: inner, pay, errorOnFailure: true });
+    await expect(paid('https://api.example/foo')).rejects.toMatchObject({
+      kind: 'invalid_402_body',
+    });
+    expect(pay).not.toHaveBeenCalled();
   });
 
   it('throws if opts.pay is missing', () => {

@@ -26,10 +26,25 @@
  */
 
 import cds from '@sap/cds';
-import { buildPaymentRequirements } from '../core/requirements';
+import { buildPaymentRequirementsMulti } from '../core/requirements';
 import { localFacilitator, type Facilitator } from '../facilitator/adapter';
 import { Codes } from '../core/errors';
-import type { AssetTransferMethod, Network, PaymentClaim } from '../core/types';
+import { resolvePrice } from './pricing';
+import { persistReceipt, resolveReceiptsEntity } from './receipts';
+import {
+  issueGrant,
+  lookupGrant,
+  resolveGrantsEntity,
+  resolveGrantTtl,
+} from './grants';
+import type {
+  AssetTransferMethod,
+  Network,
+  PaymentClaim,
+  PriceSpec,
+  PriceResolver,
+  PricingContext,
+} from '../core/types';
 
 const log = cds.log('x402');
 
@@ -37,13 +52,18 @@ export interface X402CapOptions {
   payTo: string;
   network: Network | string;
   asset: string;
-  /** Single price (applies to all gated events). */
-  priceUnits?: string | number | bigint;
   /**
-   * Per-event prices. Keys are CAP event names (entity name for CRUD,
-   * action name for actions). Events absent here pass through.
+   * Single price (applies to all gated events). May be a scalar, a
+   * `RouteOption`, or a `RouteOption[]` (multi-accept).
    */
-  routePricing?: Record<string, string | number | bigint>;
+  priceUnits?: PriceSpec;
+  /**
+   * Per-event prices. Either a static map (keys are CAP entity or
+   * action names; events absent here pass through) or a `PriceResolver`
+   * function for dynamic pricing. Resolver returning `null` skips the
+   * gate; otherwise returns a scalar / `RouteOption` / `RouteOption[]`.
+   */
+  routePricing?: Record<string, PriceSpec> | PriceResolver;
   description?: string;
   mimeType?: string;
   assetTransferMethod?: AssetTransferMethod;
@@ -59,6 +79,34 @@ export interface X402CapOptions {
    */
   resourceUrl?: (req: cds.Request) => string;
   /**
+   * Persist accepted payments to a CDS entity. Set to `true` to use the
+   * default entity `odatano.x402.X402Receipts` (shipped in the plugin's
+   * `db/x402-receipts.cds`), or pass `{ entity: 'my.namespace.MyTable' }`
+   * to write to a consumer-defined table with the same shape.
+   *
+   * INSERT runs AFTER settle confirms, BEFORE the 200 response. INSERT
+   * failures are logged and never block the response, the canonical
+   * record is on chain. Pair with `onAccepted` if you need side-effects
+   * beyond persistence.
+   */
+  receipts?: boolean | { entity?: string };
+  /**
+   * Time-limited grants: pay once, get `ttlSeconds` of free access to
+   * the same route. On accepted payment, the gate issues an opaque
+   * token and returns it via the `X-PAYMENT-GRANT` response header.
+   * The buyer presents that token via the `X-PAYMENT-GRANT` request
+   * header on subsequent calls; while it's valid the gate bypasses the
+   * 402 + verify+settle pipeline.
+   *
+   * Default `ttlSeconds`: 3600. Default entity:
+   * `odatano.x402.X402Grants` (shipped in `db/x402-grants.cds`).
+   *
+   * Grant errors (issue or lookup) are SWALLOWED. A failing DB never
+   * denies a paying buyer their response; it just means no
+   * subscription short-circuit until the DB recovers.
+   */
+  grants?: boolean | { ttlSeconds?: number; entity?: string };
+  /**
    * Facilitator implementation handling verify+settle. Default
    * `localFacilitator()`, in-process via `@odatano/core`. Use
    * `httpFacilitator({ url, apiKey })` to delegate to a hosted service.
@@ -71,40 +119,35 @@ type AnyCapService = {
   before(event: string | string[], entity: unknown, handler: (req: cds.Request) => unknown): unknown;
 };
 
-/**
- * Resolve the routePricing key for a CAP request.
- *
- * CAP fires two distinct shapes:
- *   - CRUD on an entity:  req.event === 'READ' | 'CREATE' | 'UPDATE' | 'DELETE'
- *                         req.target.name === '<Service>.<Entity>'
- *   - Action call:        req.event === '<actionName>'
- *                         req.target may be empty or the bound-entity target
- *
- * routePricing keys are meant to be human-readable identifiers (entity
- * names or action names), so we try the entity name first (more specific)
- * and fall back to the event verb. Either match wins; both miss falls
- * through to opts.priceUnits or null.
- */
-function pickPriceUnits(req: cds.Request, opts: X402CapOptions): string | null {
-  if (opts.routePricing) {
-    const event = String(req.event ?? '');
-    const targetName = (req as unknown as { target?: { name?: string } }).target?.name ?? '';
-    const entitySegment = targetName.split('.').pop() ?? '';
-    const price = opts.routePricing[entitySegment] ?? opts.routePricing[event];
-    if (price != null) return String(price);
-    if (opts.priceUnits != null) return String(opts.priceUnits);
-    return null;
-  }
-  return opts.priceUnits != null ? String(opts.priceUnits) : null;
+function getAllHeaders(req: cds.Request): Record<string, string | string[] | undefined> {
+  const httpReq = (req as unknown as { http?: { req?: { headers?: Record<string, string | string[]> } }; _?: { req?: { headers?: Record<string, string | string[]> } } });
+  return (httpReq.http?.req?.headers ?? httpReq._?.req?.headers ?? {}) as Record<string, string | string[] | undefined>;
 }
 
 function getHeader(req: cds.Request, name: string): string | undefined {
-  // CAP's req.http?.req exposes the underlying express request. Fall
-  // back to req._.req for older shapes.
-  const httpReq = (req as unknown as { http?: { req?: { headers?: Record<string, string | string[]> } }; _?: { req?: { headers?: Record<string, string | string[]> } } });
-  const hdrs = httpReq.http?.req?.headers ?? httpReq._?.req?.headers;
-  const v = hdrs?.[name];
+  const v = getAllHeaders(req)[name];
   return Array.isArray(v) ? v[0] : v;
+}
+
+/**
+ * Build the `PricingContext` for `resolvePrice` from a CAP request.
+ *
+ * CAP fires two distinct event shapes:
+ *   - CRUD on entity:  req.event === 'READ' | 'CREATE' | ...   ; req.target.name === '<Service>.<Entity>'
+ *   - Action call:     req.event === '<actionName>'             ; req.target may be empty or bound entity
+ *
+ * We surface both `event` (the verb / action name) and `target` (the
+ * fully-qualified entity name when present), giving the resolver enough
+ * to discriminate CRUD-vs-action and per-entity pricing.
+ */
+function capContext(req: cds.Request): PricingContext {
+  const event = String(req.event ?? '');
+  const target = (req as unknown as { target?: { name?: string } }).target?.name;
+  return {
+    event,
+    ...(target ? { target } : {}),
+    headers: getAllHeaders(req),
+  };
 }
 
 function getResourceUrl(req: cds.Request, opts: X402CapOptions): string {
@@ -129,21 +172,48 @@ export function gateService<S extends cds.Service>(srv: S, opts: X402CapOptions)
   if (opts.priceUnits == null && !opts.routePricing) {
     throw new Error('gateService: priceUnits or routePricing is required');
   }
-  const facilitator = opts.facilitator ?? localFacilitator();
+  const facilitator     = opts.facilitator ?? localFacilitator();
+  const receiptsEntity  = resolveReceiptsEntity(opts.receipts);
+  const grantsEntity    = resolveGrantsEntity(opts.grants);
+  const grantTtlSeconds = resolveGrantTtl(opts.grants);
 
   (srv as unknown as AnyCapService).before('*', async function x402CapGate(req: cds.Request) {
-    const priceUnits = pickPriceUnits(req, opts);
-    if (priceUnits == null) return; // unmapped → pass through
+    let options;
+    try {
+      options = await resolvePrice(opts, capContext(req));
+    } catch (err) {
+      log.error('x402 CAP gate pricing resolver threw', err);
+      (req as unknown as { reject: (status: number, message: string) => void })
+        .reject(500, 'x402 pricing error');
+      return;
+    }
+    if (options == null) return; // unmapped → pass through
 
-    const requirementsBody = buildPaymentRequirements({
-      amount: priceUnits,
-      asset: opts.asset,
-      payTo: opts.payTo,
-      network: opts.network,
+    // ─── Grant short-circuit ────────────────────────────────────────────
+    // If the buyer presents a valid X-PAYMENT-GRANT for THIS route, skip
+    // the whole 402 + verify+settle pipeline. We run the grant check
+    // AFTER pricing resolution so passes-through paths don't hit the DB,
+    // but BEFORE building the requirements body so we save the wasted
+    // work when a grant is valid.
+    if (grantsEntity) {
+      const grantToken = getHeader(req, 'x-payment-grant');
+      if (grantToken) {
+        const route = getResourceUrl(req, opts);
+        const result = await lookupGrant(grantsEntity, grantToken, route);
+        if (result.kind === 'valid') return; // bypass gate entirely
+        // expired / not-found → fall through to the payment path
+      }
+    }
+
+    const requirementsBody = buildPaymentRequirementsMulti({
+      options,
+      asset:    opts.asset,
+      payTo:    opts.payTo,
+      network:  opts.network,
       resource: {
-        url: getResourceUrl(req, opts),
+        url:         getResourceUrl(req, opts),
         description: opts.description ?? '',
-        mimeType: opts.mimeType ?? 'application/json',
+        mimeType:    opts.mimeType ?? 'application/json',
       },
       ...(opts.assetTransferMethod ? { assetTransferMethod: opts.assetTransferMethod } : {}),
       ...(opts.maxTimeoutSeconds !== undefined ? { maxTimeoutSeconds: opts.maxTimeoutSeconds } : {}),
@@ -160,8 +230,17 @@ export function gateService<S extends cds.Service>(srv: S, opts: X402CapOptions)
       processArgs.settlePollBudgetMs = opts.settlePollBudgetMs;
     }
     if (opts.allowNoTtl) processArgs.allowNoTtl = true;
-    if (opts.onAccepted) {
-      processArgs.onAccepted = (claim) => opts.onAccepted!(claim, req);
+    // Chain receipts INSERT before the user's onAccepted so consumers
+    // can read back the persisted row inside their hook if they want to.
+    // Receipts errors are swallowed inside `persistReceipt`, so the
+    // user's onAccepted still runs.
+    if (receiptsEntity || opts.onAccepted) {
+      processArgs.onAccepted = async (claim) => {
+        if (receiptsEntity) {
+          await persistReceipt(receiptsEntity, claim, getResourceUrl(req, opts));
+        }
+        if (opts.onAccepted) await opts.onAccepted(claim, req);
+      };
     }
 
     // ─── Run the pipeline. Only the orchestrator's internal errors are
@@ -186,6 +265,19 @@ export function gateService<S extends cds.Service>(srv: S, opts: X402CapOptions)
       (req as unknown as { payment?: PaymentClaim }).payment = result.payment;
       const httpRes = (req as unknown as { http?: { res?: { setHeader: (k: string, v: string) => void } } }).http?.res;
       httpRes?.setHeader('X-PAYMENT-RESPONSE', result.paymentResponseB64);
+
+      // Issue a grant token, the buyer's next request can short-circuit
+      // the 402 + settle path until expiry. Best-effort: a failed
+      // issue just means no header gets set; the response is unaffected.
+      if (grantsEntity) {
+        const grant = await issueGrant(
+          grantsEntity, result.payment, getResourceUrl(req, opts), grantTtlSeconds,
+        );
+        if (grant) {
+          httpRes?.setHeader('X-PAYMENT-GRANT',         grant.token);
+          httpRes?.setHeader('X-PAYMENT-GRANT-EXPIRES', grant.expiresAt);
+        }
+      }
       return;
     }
 

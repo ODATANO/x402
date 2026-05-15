@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>x402 browser-buyer demo</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      body { font: 14px/1.45 system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+      button { padding: .5rem .75rem; margin: .25rem .25rem .25rem 0; }
+      pre { background: #f5f5f5; padding: .75rem; border-radius: 4px; overflow: auto; }
+      .row { margin: 1rem 0; }
+      .err { color: #b00020; }
+    </style>
+  </head>
+  <body>
+    <h1>x402 browser buyer</h1>
+    <p>Drop-in CIP-30 wallet + <code>x402Fetch</code> wiring. Reads
+       the buyer address from a Cardano wallet (Eternl / Lace / Nami) and
+       transparently handles 402 on a gated endpoint.</p>
+
+    <div class="row">
+      <button id="connect">Connect wallet</button>
+      <span id="walletStatus">no wallet</span>
+    </div>
+
+    <div class="row">
+      <label for="endpoint">Gated endpoint:</label>
+      <input id="endpoint" size="60" value="http://localhost:4004/odata/v4/prices/Quotes" />
+    </div>
+
+    <div class="row">
+      <button id="call">Call endpoint</button>
+    </div>
+
+    <pre id="out">(no output yet)</pre>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -17,6 +17,7 @@
  */
 
 import { encodePaymentEnvelope } from './envelope';
+import { X402PaymentError, paymentErrorFromBody, unwrapCapEnvelope } from './errors';
 import type { X402ClientOptions } from './types';
 import type { PaymentRequirementsBody, PaymentRequirementEntry } from '../core/types';
 
@@ -66,6 +67,23 @@ export function x402Axios<T extends AxiosInstanceLike>(
   const selectFirst = (a: PaymentRequirementEntry[]) => a[0];
   const select      = opts.selectAccepts ?? selectFirst;
 
+  function maybeWrap(
+    body: PaymentRequirementsBody | undefined,
+    kind: 'retries_exhausted' | 'server_rejected' | 'invalid_402_body',
+    httpStatus: number,
+    cause?: unknown,
+  ): X402PaymentError {
+    if (body && body.x402Version === 2 && Array.isArray(body.accepts)) {
+      return paymentErrorFromBody(body, { kind, httpStatus, cause });
+    }
+    return new X402PaymentError({
+      message:    `x402Axios: ${kind.replace('_', ' ')}`,
+      kind:       'invalid_402_body',
+      httpStatus,
+      ...(cause !== undefined ? { cause } : {}),
+    });
+  }
+
   instance.interceptors.response.use(
     (response) => response,
     async (error) => {
@@ -74,21 +92,49 @@ export function x402Axios<T extends AxiosInstanceLike>(
       }
       const cfg = error.config;
       const retries = Number(cfg[RETRY_KEY] ?? 0);
-      if (retries >= maxRetries) throw error;
+      // CAP-style servers wrap the v2 body inside an OData error envelope.
+      // Defensively unwrap before validating shape.
+      const body = unwrapCapEnvelope(error.response.data) as PaymentRequirementsBody | undefined;
+      const status = error.response.status;
 
-      const body = error.response.data as PaymentRequirementsBody | undefined;
-      if (body?.x402Version !== 2 || !Array.isArray(body.accepts) || body.accepts.length === 0) {
+      if (retries >= maxRetries) {
+        if (opts.errorOnFailure) {
+          throw maybeWrap(body, 'retries_exhausted', status, error);
+        }
+        throw error;
+      }
+      if (!body || body.x402Version !== 2 || !Array.isArray(body.accepts) || body.accepts.length === 0) {
+        if (opts.errorOnFailure) {
+          throw maybeWrap(body, 'invalid_402_body', status, error);
+        }
         throw error;
       }
 
       const chosen = select(body.accepts);
-      if (!chosen) throw error;
+      if (!chosen) {
+        if (opts.errorOnFailure) {
+          throw maybeWrap(body, 'server_rejected', status, error);
+        }
+        throw error;
+      }
 
-      const { signedTxCborHex, nonceRef } = await opts.pay(chosen);
+      // Wrap pay-handler throws unconditionally, callers benefit from
+      // the structured shape regardless of errorOnFailure.
+      let payResult;
+      try {
+        payResult = await opts.pay(chosen);
+      } catch (err) {
+        throw new X402PaymentError({
+          message: `x402Axios: pay handler failed: ${(err as { message?: string })?.message ?? String(err)}`,
+          kind:    'pay_handler_failed',
+          accepts: body.accepts,
+          cause:   err,
+        });
+      }
       const header = encodePaymentEnvelope({
         network:         chosen.network,
-        signedTxCborHex,
-        nonceRef,
+        signedTxCborHex: payResult.signedTxCborHex,
+        nonceRef:        payResult.nonceRef,
       });
 
       const nextCfg: AxiosRequestConfigLike = {

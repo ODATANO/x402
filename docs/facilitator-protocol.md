@@ -93,6 +93,7 @@ One of three discriminated `kind`s:
     "network":     "cardano:preprod",
     "unit":        "",                          // empty for lovelace
     "asset":       "lovelace",
+    "payTo":       "addr_test1...",             // verified recipient
     "resourceUrl": "/odata/v4/prices/Quotes",
     "nonceRef":    "<txHash>#<index>"
   },
@@ -198,37 +199,39 @@ future buyer-driven cache-bust).
 
 ## Reference implementation
 
-The local in-process facilitator (`localFacilitator()` in
-`srv/facilitator/adapter.ts`) is the canonical reference. To stand up
-a network-exposed version, wrap it in a thin Express server:
+Use `createFacilitatorRouter()` to stand up a spec-compliant facilitator
+in a handful of lines. The router wraps a `Facilitator` (defaulting to
+the in-process `localFacilitator()`) and exposes the three endpoints
+above plus a `/healthz` liveness probe.
 
 ```typescript
 import express from 'express';
-import { localFacilitator } from '@odatano/x402';
+import { createFacilitatorRouter } from '@odatano/x402';
 
 const app = express();
-app.use(express.json({ limit: '256kb' }));
 
-const fac = localFacilitator();
-
-app.post('/verify-settle', async (req, res) => {
-  // (Add auth middleware here: bearer token check, mTLS, etc.)
-  try {
-    const result = await fac.verifyAndSettle(req.body);
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
-  }
-});
-
-app.get('/supported', async (_req, res) => {
-  res.json(await fac.supported!());
-});
+app.use('/v1', createFacilitatorRouter({
+  // Default: localFacilitator(), runs the pipeline in-process via
+  // @odatano/core. Pass any Facilitator to chain / mock / proxy.
+  auth: (req) =>
+    req.headers.authorization === `Bearer ${process.env.FACILITATOR_API_KEY}`,
+  onRejected: (result) => audit.log('x402.rejected', result),
+  onPending:  (result) => audit.log('x402.pending', result),
+}));
 
 app.listen(4040);
 ```
 
-The deployed service then needs `@odatano/core` configured against
-its own Cardano backend (Blockfrost / Koios / Ogmios). Resource servers
-calling this facilitator do **not** need `@odatano/core` themselves;
-that's the architectural win of the split.
+Endpoints exposed: `POST /v1/verify-settle`, `GET /v1/supported`,
+`GET /v1/healthz`. The `/healthz` route bypasses `auth` so k8s / Cloud
+Run probes work without a token.
+
+`onAccepted` does NOT cross the HTTP boundary, the matching
+`httpFacilitator()` client invokes it locally after the response. The
+router-side `onRejected` / `onPending` hooks fill the facilitator-side
+audit gap; both fire AFTER the response is sent and swallow errors.
+
+The deployed service needs `@odatano/core` configured against its own
+Cardano backend (Blockfrost / Koios / Ogmios). Resource servers calling
+this facilitator do **not** need `@odatano/core` themselves; that's the
+architectural win of the split.

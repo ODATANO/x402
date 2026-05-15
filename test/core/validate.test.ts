@@ -1,17 +1,25 @@
-import { validatePayment } from '../../srv/core/validate';
+import { validatePayment, pickRequirement } from '../../srv/core/validate';
 import { Codes } from '../../srv/core/errors';
 import {
   BUYER_PRIV, BUYER_ADDR, SELLER_ADDR,
   NONCE_TX_HASH, NONCE_INDEX, NONCE_REF,
   CURRENT_SLOT, FUTURE_SLOT, PAST_SLOT,
   TEST_POLICY_ID, TEST_ASSET_NAME, TEST_ASSET_STRING,
+  USDM_PREPROD_ASSET,
   NETWORK_PREPROD, NETWORK_MAINNET,
 } from '../fixtures/constants';
 import { buildBody, signTx, buildUnsigned } from '../fixtures/build-tx';
 import { buildEnvelope } from '../fixtures/envelope';
 import { decode } from '../../srv/core/decode';
-import { buildEntry } from '../../srv/core/requirements';
-import type { PaymentRequirementEntry } from '../../srv/core/types';
+import {
+  buildEntry,
+  buildPaymentRequirementsMulti,
+  buildPaymentRequirements,
+} from '../../srv/core/requirements';
+import type {
+  PaymentRequirementEntry,
+  PaymentRequirementsBody,
+} from '../../srv/core/types';
 
 /** Build a fully-decoded payment + the matching requirements entry. */
 function makeFixture({
@@ -218,6 +226,87 @@ describe('validatePayment, happy path', () => {
         resourceUrl: '/r',
         txHash: decoded.txHash,
       });
+    }
+  });
+});
+
+describe('pickRequirement', () => {
+  it('returns the only entry when accepts has length 1 and network matches', () => {
+    const { decoded } = makeFixture({
+      outputs: [{ address: SELLER_ADDR, lovelace: '1000000' }],
+    });
+    const body: PaymentRequirementsBody = buildPaymentRequirements({
+      amount:   '500000',
+      asset:    'lovelace',
+      payTo:    SELLER_ADDR,
+      network:  NETWORK_PREPROD,
+      resource: '/r',
+    });
+    const r = pickRequirement(decoded, body);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.entry).toBe(body.accepts[0]);
+  });
+
+  it('rejects with network_mismatch when no entry matches the envelope network', () => {
+    const { decoded } = makeFixture({
+      outputs: [{ address: SELLER_ADDR, lovelace: '1000000' }],
+      network: NETWORK_MAINNET, // envelope says mainnet
+    });
+    const body = buildPaymentRequirements({
+      amount: '1', asset: 'lovelace', payTo: SELLER_ADDR,
+      network: NETWORK_PREPROD, resource: '/r',
+    });
+    const r = pickRequirement(decoded, body);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe(Codes.NETWORK_MISMATCH);
+  });
+
+  it('picks the entry whose asset+payTo matches a paid output (multi-accept)', () => {
+    // Buyer pays USDM, not ADA. Server offered both options.
+    const { decoded } = makeFixture({
+      outputs: [{
+        address:  SELLER_ADDR,
+        lovelace: '1000000', // min-ADA, ignored as payment asset
+        assets:   [{
+          policyId: '16a55b2a349361ff88c03788f93e1e966e5d689605d044fef722ddde',
+          nameHex:  '0014df105553444d',
+          qty:      '100000',
+        }],
+      }],
+    });
+    const body = buildPaymentRequirementsMulti({
+      payTo:    SELLER_ADDR,
+      network:  NETWORK_PREPROD,
+      resource: '/r',
+      options: [
+        { amount: '500000', asset: 'lovelace' },         // not paid in this currency
+        { amount: '100000', asset: USDM_PREPROD_ASSET }, // ← what the buyer actually paid
+      ],
+    });
+    const r = pickRequirement(decoded, body);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.entry.asset).toBe(USDM_PREPROD_ASSET);
+  });
+
+  it('rejects with wrong_asset when no multi-accept entry matches the paid output', () => {
+    const { decoded } = makeFixture({
+      outputs: [{ address: SELLER_ADDR, lovelace: '1000000' }],
+    });
+    // Server demands a native token, buyer paid ADA. No entry matches.
+    const body = buildPaymentRequirementsMulti({
+      payTo:    SELLER_ADDR,
+      network:  NETWORK_PREPROD,
+      resource: '/r',
+      options: [
+        { amount: '1', asset: USDM_PREPROD_ASSET },
+        { amount: '1', asset: TEST_ASSET_STRING  },
+      ],
+    });
+    const r = pickRequirement(decoded, body);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe(Codes.WRONG_ASSET);
+      expect(r.reason).toMatch(USDM_PREPROD_ASSET);
     }
   });
 });

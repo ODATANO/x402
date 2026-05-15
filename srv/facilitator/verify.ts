@@ -23,8 +23,7 @@
 
 import cds from '@sap/cds';
 import { decode } from '../core/decode';
-import { validatePayment } from '../core/validate';
-import { flatRequirements } from '../core/requirements';
+import { validatePayment, pickRequirement } from '../core/validate';
 import { Codes, X402Error, type X402Code } from '../core/errors';
 import { checkNonceUnspent } from './nonce';
 import { settle, type SettleArgs } from './settle';
@@ -116,9 +115,10 @@ export async function process(args: ProcessArgs): Promise<ProcessResult> {
     };
   }
 
-  const requirements = flatRequirements(args.requirementsBody);
-
   // ─── 1. Decode ──────────────────────────────────────────────────────
+  // Decode happens BEFORE we pick a requirements entry, the picker needs
+  // to know which (payTo, asset) the tx actually credits to choose
+  // among multi-accept options.
   let decoded;
   try {
     decoded = decode(headerStr);
@@ -133,6 +133,20 @@ export async function process(args: ProcessArgs): Promise<ProcessResult> {
     }
     throw err;
   }
+
+  // Pick the accepts[] entry the buyer paid against. For single-entry
+  // bodies this is the same as the old `flatRequirements`; for
+  // multi-accept it routes the tx to the matching seller option.
+  const picked = pickRequirement(decoded, args.requirementsBody);
+  if (!picked.ok) {
+    return {
+      kind: 'rejected',
+      code: picked.code,
+      reason: picked.reason,
+      requirementsBody: args.requirementsBody,
+    };
+  }
+  const requirements = picked.entry;
 
   // ─── 2. Validate (6 checks, pure) ───────────────────────────────────
   let currentSlot: number;

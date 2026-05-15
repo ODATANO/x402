@@ -6,6 +6,7 @@
  */
 
 import { x402Axios } from '../../srv/client/axios';
+import { X402PaymentError } from '../../srv/client/errors';
 import { decode } from '../../srv/core/decode';
 import { buildBody, signTx } from '../fixtures/build-tx';
 import {
@@ -138,6 +139,81 @@ describe('x402Axios', () => {
     await expect(client.request({ url: '/foo' })).rejects.toMatchObject({ response: { status: 402 } });
     expect(pay).toHaveBeenCalledTimes(1);
     expect(calls).toHaveLength(2);
+  });
+
+  it('unwraps CAP / OData error envelope around the v2 body and pays through it', async () => {
+    const wrapped = {
+      error: {
+        message: JSON.stringify(REQS),
+        code: '402',
+        '@Common.numericSeverity': 4,
+      },
+    };
+    const { instance, calls } = makeShim([
+      { status: 402, data: wrapped },
+      { status: 200, data: 'paid' },
+    ]);
+    const pay = jest.fn(async () => ({
+      signedTxCborHex: signed.cborHex, nonceRef: NONCE_REF,
+    }));
+    const client = x402Axios(instance, { pay });
+
+    const res = await client.request({ url: '/foo' }) as { status: number };
+    expect(res.status).toBe(200);
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('wraps pay-handler errors in X402PaymentError(pay_handler_failed)', async () => {
+    const { instance } = makeShim([{ status: 402, data: REQS }]);
+    const walletError = new Error('wallet cancelled');
+    const pay = jest.fn(async () => { throw walletError; });
+    const client = x402Axios(instance, { pay });
+
+    try {
+      await client.request({ url: '/foo' });
+      throw new Error('should not reach here');
+    } catch (err) {
+      expect(err).toBeInstanceOf(X402PaymentError);
+      const e = err as X402PaymentError;
+      expect(e.kind).toBe('pay_handler_failed');
+      expect(e.cause).toBe(walletError);
+    }
+  });
+
+  it('errorOnFailure: wraps retries-exhausted in X402PaymentError', async () => {
+    const errorBody = { ...REQS, error: 'payment required (insufficient_amount): paid 1 < required 1000' };
+    const { instance } = makeShim([
+      { status: 402, data: errorBody },
+      { status: 402, data: errorBody },
+    ]);
+    const pay = jest.fn(async () => ({
+      signedTxCborHex: signed.cborHex, nonceRef: NONCE_REF,
+    }));
+    const client = x402Axios(instance, { pay, maxRetries: 1, errorOnFailure: true });
+
+    try {
+      await client.request({ url: '/foo' });
+      throw new Error('should not reach here');
+    } catch (err) {
+      expect(err).toBeInstanceOf(X402PaymentError);
+      const e = err as X402PaymentError;
+      expect(e.kind).toBe('retries_exhausted');
+      expect(e.code).toBe('insufficient_amount');
+      expect(e.httpStatus).toBe(402);
+    }
+  });
+
+  it('default behaviour without errorOnFailure: still re-throws the original AxiosError', async () => {
+    const { instance } = makeShim([
+      { status: 402, data: REQS },
+      { status: 402, data: REQS },
+    ]);
+    const pay = jest.fn(async () => ({
+      signedTxCborHex: signed.cborHex, nonceRef: NONCE_REF,
+    }));
+    const client = x402Axios(instance, { pay, maxRetries: 1 });
+    await expect(client.request({ url: '/foo' })).rejects.toMatchObject({ response: { status: 402 } });
   });
 
   it('throws if opts.pay is missing', () => {

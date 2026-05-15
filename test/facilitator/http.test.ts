@@ -37,6 +37,7 @@ const ACCEPTED_CLAIM: PaymentClaim = {
   network:     NETWORK_PREPROD,
   unit:        '',
   asset:       'lovelace',
+  payTo:       SELLER_ADDR,
   resourceUrl: '/foo',
   nonceRef:    'd'.repeat(64) + '#0',
 };

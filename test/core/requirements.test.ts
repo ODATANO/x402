@@ -1,6 +1,12 @@
-import { buildPaymentRequirements, buildEntry, flatRequirements } from '../../srv/core/requirements';
+import {
+  buildPaymentRequirements,
+  buildPaymentRequirementsMulti,
+  buildEntry,
+  flatRequirements,
+} from '../../srv/core/requirements';
 import {
   SELLER_ADDR,
+  BUYER_ADDR,
   USDM_PREPROD_ASSET,
   NETWORK_PREPROD,
 } from '../fixtures/constants';
@@ -101,6 +107,64 @@ describe('buildPaymentRequirements', () => {
 
   it('emits the missing-header error string when requested', () => {
     const body = buildPaymentRequirements({ ...baseArgs, withMissingHeaderError: true });
+    expect(body.error).toBe('PAYMENT-SIGNATURE header is required');
+  });
+});
+
+describe('buildPaymentRequirementsMulti', () => {
+  const baseArgs = {
+    payTo:    SELLER_ADDR,
+    network:  NETWORK_PREPROD,
+    asset:    'lovelace',
+    resource: '/multi',
+  };
+
+  it('produces one accepts[] entry per option, inheriting defaults', () => {
+    const body = buildPaymentRequirementsMulti({
+      ...baseArgs,
+      options: [
+        { amount: '500000' },                            // inherits lovelace + SELLER_ADDR
+        { amount: '100000', asset: USDM_PREPROD_ASSET }, // overrides asset
+      ],
+    });
+    expect(body.accepts).toHaveLength(2);
+    expect(body.accepts[0]!.asset).toBe('lovelace');
+    expect(body.accepts[0]!.payTo).toBe(SELLER_ADDR);
+    expect(body.accepts[1]!.asset).toBe(USDM_PREPROD_ASSET);
+    expect(body.accepts[1]!.payTo).toBe(SELLER_ADDR);
+  });
+
+  it('per-option payTo / network / assetTransferMethod override top-level defaults', () => {
+    const body = buildPaymentRequirementsMulti({
+      ...baseArgs,
+      options: [
+        { amount: '1000000', payTo: BUYER_ADDR, assetTransferMethod: 'masumi' },
+      ],
+    });
+    expect(body.accepts[0]!.payTo).toBe(BUYER_ADDR);
+    expect(body.accepts[0]!.assetTransferMethod).toBe('masumi');
+  });
+
+  it('throws on empty options array', () => {
+    expect(() =>
+      buildPaymentRequirementsMulti({ ...baseArgs, options: [] }),
+    ).toThrow(/non-empty/);
+  });
+
+  it('throws when an option lacks asset and no top-level asset is set', () => {
+    const { asset: _unused, ...withoutAsset } = baseArgs;
+    void _unused;
+    expect(() =>
+      buildPaymentRequirementsMulti({ ...withoutAsset, options: [{ amount: '1' }] }),
+    ).toThrow(/asset/);
+  });
+
+  it('emits the missing-header error string when requested', () => {
+    const body = buildPaymentRequirementsMulti({
+      ...baseArgs,
+      options: [{ amount: '500000' }],
+      withMissingHeaderError: true,
+    });
     expect(body.error).toBe('PAYMENT-SIGNATURE header is required');
   });
 });

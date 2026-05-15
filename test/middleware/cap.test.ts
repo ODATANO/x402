@@ -15,6 +15,28 @@ jest.mock('../../srv/facilitator/verify', () => ({
   process: (...args: unknown[]) => mockProcess(...args),
 }));
 
+const mockPersistReceipt = jest.fn();
+jest.mock('../../srv/middleware/receipts', () => {
+  // Keep `resolveReceiptsEntity` real so the option-shape parsing is
+  // exercised end-to-end; only the INSERT call is intercepted.
+  const actual = jest.requireActual('../../srv/middleware/receipts');
+  return {
+    ...actual,
+    persistReceipt: (...args: unknown[]) => mockPersistReceipt(...args),
+  };
+});
+
+const mockIssueGrant  = jest.fn();
+const mockLookupGrant = jest.fn();
+jest.mock('../../srv/middleware/grants', () => {
+  const actual = jest.requireActual('../../srv/middleware/grants');
+  return {
+    ...actual,
+    issueGrant:  (...args: unknown[]) => mockIssueGrant(...args),
+    lookupGrant: (...args: unknown[]) => mockLookupGrant(...args),
+  };
+});
+
 import { gateService } from '../../srv/middleware/cap';
 import { Codes } from '../../srv/core/errors';
 import { SELLER_ADDR, NETWORK_PREPROD } from '../fixtures/constants';
@@ -119,6 +141,58 @@ describe('gateService, bypass behaviour', () => {
     expect(mockProcess).toHaveBeenCalledTimes(1);
     const call = mockProcess.mock.calls[0]![0] as { requirementsBody: { accepts: Array<{ amount: string }> } };
     expect(call.requirementsBody.accepts[0]!.amount).toBe('5000');
+  });
+});
+
+describe('gateService, dynamic pricing (routePricing as function)', () => {
+  function stubAccepts() {
+    mockProcess.mockResolvedValue({
+      kind: 'rejected', code: Codes.MISSING_HEADER, reason: '',
+      requirementsBody: { x402Version: 2, error: 'X', accepts: [] },
+    });
+  }
+
+  it('invokes resolver with PricingContext including event + target', async () => {
+    stubAccepts();
+    const resolver = jest.fn(() => '9000');
+    const f = fakeService();
+    gateService(f.srv as never, {
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
+      routePricing: resolver,
+    });
+    await f.invoke(makeReq({ event: 'READ', entity: 'Quotes', headers: { 'x-tier': 'gold' } }));
+    expect(resolver).toHaveBeenCalledTimes(1);
+    const ctx = resolver.mock.calls[0]![0] as { event: string; target?: string; headers: Record<string, string> };
+    expect(ctx.event).toBe('READ');
+    expect(ctx.target).toBe('PricesService.Quotes');
+    expect(ctx.headers['x-tier']).toBe('gold');
+
+    const call = mockProcess.mock.calls[0]![0] as { requirementsBody: { accepts: Array<{ amount: string }> } };
+    expect(call.requirementsBody.accepts[0]!.amount).toBe('9000');
+  });
+
+  it('returning null = pass-through (no facilitator call, no reject)', async () => {
+    const f = fakeService();
+    gateService(f.srv as never, {
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
+      routePricing: () => null,
+    });
+    const req = makeReq({ event: 'anyAction' });
+    await f.invoke(req);
+    expect(req.reject).not.toHaveBeenCalled();
+    expect(mockProcess).not.toHaveBeenCalled();
+  });
+
+  it('rejects with 500 when resolver throws', async () => {
+    const f = fakeService();
+    gateService(f.srv as never, {
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
+      routePricing: () => { throw new Error('pricing DB down'); },
+    });
+    const req = makeReq({ event: 'foo' });
+    await f.invoke(req);
+    expect(req.reject).toHaveBeenCalledWith(500, expect.stringContaining('pricing'));
+    expect(mockProcess).not.toHaveBeenCalled();
   });
 });
 
@@ -229,5 +303,209 @@ describe('gateService, custom resourceUrl', () => {
     await f.invoke(makeReq({ event: 'myAction' }));
     const call = mockProcess.mock.calls[0]![0] as { requirementsBody: { accepts: Array<{ resource: { url: string } }> } };
     expect(call.requirementsBody.accepts[0]!.resource.url).toBe('custom://myAction');
+  });
+});
+
+describe('gateService, grants', () => {
+  const ACCEPTED = {
+    kind: 'accepted',
+    txHash: 'cd'.repeat(32),
+    payment: {
+      txHash: 'cd'.repeat(32),
+      amountUnits: '1',
+      network: NETWORK_PREPROD,
+      unit: '',
+      asset: 'lovelace',
+      payTo: SELLER_ADDR,
+      resourceUrl: '/r',
+      nonceRef: 'x#0',
+    },
+    paymentResponseB64: 'AAAA',
+  };
+
+  it('valid grant header bypasses 402 entirely', async () => {
+    mockLookupGrant.mockResolvedValue({ kind: 'valid' });
+    const f = fakeService();
+    gateService(f.srv as never, {
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
+      priceUnits: '1',
+      grants: true,
+    });
+    const req = makeReq({ event: 'something', headers: { 'x-payment-grant': 'tok-abc' } });
+    await f.invoke(req);
+    expect(mockProcess).not.toHaveBeenCalled();
+    expect(req.reject).not.toHaveBeenCalled();
+    expect(mockLookupGrant).toHaveBeenCalledWith(
+      'odatano.x402.X402Grants', 'tok-abc', expect.any(String),
+    );
+  });
+
+  it('expired grant falls through to the normal payment path', async () => {
+    mockLookupGrant.mockResolvedValue({ kind: 'expired' });
+    mockProcess.mockResolvedValue({
+      kind: 'rejected', code: Codes.MISSING_HEADER, reason: '',
+      requirementsBody: { x402Version: 2, error: 'X', accepts: [] },
+    });
+    const f = fakeService();
+    gateService(f.srv as never, {
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
+      priceUnits: '1',
+      grants: true,
+    });
+    const req = makeReq({ event: 'x', headers: { 'x-payment-grant': 'old-token' } });
+    await f.invoke(req);
+    expect(mockProcess).toHaveBeenCalledTimes(1); // payment path ran
+    expect(req.reject).toHaveBeenCalledWith(402, expect.any(String));
+  });
+
+  it('issues a grant on accepted payment and sets X-PAYMENT-GRANT response header', async () => {
+    mockProcess.mockResolvedValue(ACCEPTED);
+    mockIssueGrant.mockResolvedValue({
+      token: 'new-tok-xyz',
+      expiresAt: '2099-01-01T00:00:00.000Z',
+    });
+    const f = fakeService();
+    gateService(f.srv as never, {
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
+      priceUnits: '1',
+      grants: { ttlSeconds: 7200 },
+    });
+    const req = makeReq({ event: 'getThing' });
+    await f.invoke(req);
+
+    expect(mockIssueGrant).toHaveBeenCalledTimes(1);
+    const [entity, claim, route, ttl] = mockIssueGrant.mock.calls[0]!;
+    expect(entity).toBe('odatano.x402.X402Grants');
+    expect(claim.txHash).toBe(ACCEPTED.payment.txHash);
+    expect(route).toBe('/odata/v4/svc/getThing');
+    expect(ttl).toBe(7200);
+
+    expect(req.http?.res?.setHeader).toHaveBeenCalledWith('X-PAYMENT-GRANT', 'new-tok-xyz');
+    expect(req.http?.res?.setHeader).toHaveBeenCalledWith('X-PAYMENT-GRANT-EXPIRES', '2099-01-01T00:00:00.000Z');
+  });
+
+  it('does NOT set grant headers when issueGrant returns null (DB failure)', async () => {
+    mockProcess.mockResolvedValue(ACCEPTED);
+    mockIssueGrant.mockResolvedValue(null);
+    const f = fakeService();
+    gateService(f.srv as never, {
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
+      priceUnits: '1',
+      grants: true,
+    });
+    const req = makeReq({ event: 'x' });
+    await f.invoke(req);
+    // X-PAYMENT-RESPONSE still set, X-PAYMENT-GRANT NOT set.
+    const headerCalls = req.http?.res?.setHeader.mock.calls.map((c) => c[0]) ?? [];
+    expect(headerCalls).toContain('X-PAYMENT-RESPONSE');
+    expect(headerCalls).not.toContain('X-PAYMENT-GRANT');
+  });
+
+  it('does NOT call lookup or issue when grants option absent', async () => {
+    mockProcess.mockResolvedValue(ACCEPTED);
+    const f = fakeService();
+    gateService(f.srv as never, {
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
+      priceUnits: '1',
+    });
+    await f.invoke(makeReq({ event: 'x', headers: { 'x-payment-grant': 'ignored' } }));
+    expect(mockLookupGrant).not.toHaveBeenCalled();
+    expect(mockIssueGrant).not.toHaveBeenCalled();
+  });
+});
+
+describe('gateService, receipts persistence', () => {
+  const ACCEPTED = {
+    kind: 'accepted',
+    txHash: 'cd'.repeat(32),
+    payment: {
+      txHash: 'cd'.repeat(32),
+      amountUnits: '1',
+      network: NETWORK_PREPROD,
+      unit: '',
+      asset: 'lovelace',
+      payTo: SELLER_ADDR,
+      resourceUrl: '/r',
+      nonceRef: 'x#0',
+    },
+    paymentResponseB64: 'AAAA',
+  };
+
+  /**
+   * Call the captured onAccepted that gateService passed to the
+   * facilitator. We need this because mockProcess never actually runs
+   * the pipeline, so we have to invoke onAccepted ourselves to exercise
+   * the receipts path.
+   */
+  async function fireOnAccepted() {
+    const args = mockProcess.mock.calls[0]![0] as { onAccepted?: (c: typeof ACCEPTED.payment) => Promise<void> };
+    if (args.onAccepted) await args.onAccepted(ACCEPTED.payment);
+  }
+
+  it('persists a receipt to the default entity when receipts: true', async () => {
+    mockProcess.mockResolvedValue(ACCEPTED);
+    const f = fakeService();
+    gateService(f.srv as never, {
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
+      priceUnits: '1',
+      receipts: true,
+    });
+    const req = makeReq({ event: 'getThing' });
+    await f.invoke(req);
+    await fireOnAccepted();
+
+    expect(mockPersistReceipt).toHaveBeenCalledTimes(1);
+    const [entityName, claim, route] = mockPersistReceipt.mock.calls[0]!;
+    expect(entityName).toBe('odatano.x402.X402Receipts');
+    expect(claim.txHash).toBe(ACCEPTED.payment.txHash);
+    expect(route).toBe('/odata/v4/svc/getThing');
+  });
+
+  it('uses a custom entity name when receipts: { entity }', async () => {
+    mockProcess.mockResolvedValue(ACCEPTED);
+    const f = fakeService();
+    gateService(f.srv as never, {
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
+      priceUnits: '1',
+      receipts: { entity: 'my.ns.MyReceipts' },
+    });
+    await f.invoke(makeReq({ event: 'x' }));
+    await fireOnAccepted();
+    expect(mockPersistReceipt.mock.calls[0]![0]).toBe('my.ns.MyReceipts');
+  });
+
+  it('skips receipts entirely when option absent', async () => {
+    mockProcess.mockResolvedValue(ACCEPTED);
+    const f = fakeService();
+    gateService(f.srv as never, {
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
+      priceUnits: '1',
+      // no receipts option
+    });
+    await f.invoke(makeReq({ event: 'x' }));
+    // onAccepted may not even be set on processArgs if neither receipts
+    // nor user-onAccepted is configured. Either way, persistReceipt
+    // never runs.
+    await fireOnAccepted();
+    expect(mockPersistReceipt).not.toHaveBeenCalled();
+  });
+
+  it('chains receipts before the user-supplied onAccepted', async () => {
+    mockProcess.mockResolvedValue(ACCEPTED);
+    const order: string[] = [];
+    mockPersistReceipt.mockImplementation(async () => { order.push('persist'); });
+    const onAccepted = jest.fn(async () => { order.push('user'); });
+
+    const f = fakeService();
+    gateService(f.srv as never, {
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
+      priceUnits: '1',
+      receipts: true,
+      onAccepted,
+    });
+    await f.invoke(makeReq({ event: 'x' }));
+    await fireOnAccepted();
+
+    expect(order).toEqual(['persist', 'user']);
   });
 });

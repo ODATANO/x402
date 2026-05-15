@@ -49,4 +49,16 @@ export interface X402ClientOptions {
    *, i.e. one payment attempt per request, no infinite loops.
    */
   maxRetries?: number;
+  /**
+   * When `true`, throw an `X402PaymentError` after retries are
+   * exhausted (or when the 402 body is malformed). Default `false`:
+   *
+   *   - `x402Fetch` returns the last `Response` (the 402 itself).
+   *   - `x402Axios` re-throws the original AxiosError.
+   *
+   * Pay-handler throws are ALWAYS wrapped in `X402PaymentError` (kind:
+   * `'pay_handler_failed'`) regardless of this flag, with the original
+   * error preserved on `.cause`.
+   */
+  errorOnFailure?: boolean;
 }

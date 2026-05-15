@@ -1,0 +1,30 @@
+{
+  "name": "@odatano/x402-example-facilitator-server",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Reference HTTP facilitator that resource servers can target via httpFacilitator().",
+  "scripts": {
+    "start": "tsx server.ts"
+  },
+  "dependencies": {
+    "@odatano/core": "^1.7.8",
+    "@odatano/x402": "*",
+    "@sap/cds": "^9",
+    "express": "^4"
+  },
+  "devDependencies": {
+    "@types/express": "^4",
+    "@types/node": "^22",
+    "tsx": "^4",
+    "typescript": "^5"
+  },
+  "cds": {
+    "requires": {
+      "odatano-core": {
+        "network": "preprod",
+        "backends": ["blockfrost"],
+        "blockfrostApiKey": "${BLOCKFROST_API_KEY}"
+      }
+    }
+  }
+}

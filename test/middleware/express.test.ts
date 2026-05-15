@@ -18,7 +18,7 @@ jest.mock('../../srv/facilitator/verify', () => ({
 
 import { x402Middleware } from '../../srv/middleware/express';
 import { Codes } from '../../srv/core/errors';
-import { SELLER_ADDR, NETWORK_PREPROD } from '../fixtures/constants';
+import { SELLER_ADDR, NETWORK_PREPROD, USDM_PREPROD_ASSET } from '../fixtures/constants';
 import type { Request, Response } from 'express';
 
 interface MockRes {
@@ -118,6 +118,90 @@ describe('x402Middleware, pricing resolution', () => {
     await mw(mockReq({ path: '/getBestPrice(pair=\'ADA-USD\')' }), mockRes() as unknown as Response, jest.fn());
     const call = mockProcess.mock.calls[0]![0] as { requirementsBody: { accepts: Array<{ amount: string }> } };
     expect(call.requirementsBody.accepts[0]!.amount).toBe('7777');
+  });
+});
+
+describe('x402Middleware, dynamic pricing (routePricing as function)', () => {
+  function stubAccepts() {
+    mockProcess.mockResolvedValue({
+      kind: 'rejected',
+      code: Codes.MISSING_HEADER,
+      reason: 'r',
+      requirementsBody: { x402Version: 2, error: '', accepts: [] },
+    });
+  }
+
+  it('invokes the resolver with PricingContext and uses its scalar return', async () => {
+    stubAccepts();
+    const resolver = jest.fn(() => '4242');
+    const mw = x402Middleware({
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
+      routePricing: resolver,
+    });
+    await mw(
+      mockReq({ path: '/getBestPrice(pair=\'ADA-USD\')', headers: { 'x-tier': 'gold' } }),
+      mockRes() as unknown as Response,
+      jest.fn(),
+    );
+    expect(resolver).toHaveBeenCalledTimes(1);
+    const ctx = resolver.mock.calls[0]![0] as { event: string; path: string; headers: Record<string, string> };
+    expect(ctx.event).toBe('getBestPrice');
+    expect(ctx.path).toBe('/getBestPrice(pair=\'ADA-USD\')');
+    expect(ctx.headers['x-tier']).toBe('gold');
+
+    const call = mockProcess.mock.calls[0]![0] as { requirementsBody: { accepts: Array<{ amount: string }> } };
+    expect(call.requirementsBody.accepts[0]!.amount).toBe('4242');
+  });
+
+  it('treats null resolver result as pass-through (no facilitator call, next called)', async () => {
+    const next = jest.fn();
+    const mw = x402Middleware({
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
+      routePricing: () => null,
+    });
+    await mw(mockReq({ path: '/anything' }), mockRes() as unknown as Response, next);
+    expect(next).toHaveBeenCalled();
+    expect(mockProcess).not.toHaveBeenCalled();
+  });
+
+  it('supports async resolver', async () => {
+    stubAccepts();
+    const mw = x402Middleware({
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
+      routePricing: async () => ({ amount: '8888' }),
+    });
+    await mw(mockReq({ path: '/foo' }), mockRes() as unknown as Response, jest.fn());
+    const call = mockProcess.mock.calls[0]![0] as { requirementsBody: { accepts: Array<{ amount: string }> } };
+    expect(call.requirementsBody.accepts[0]!.amount).toBe('8888');
+  });
+
+  it('emits multi-entry accepts[] when resolver returns RouteOption[]', async () => {
+    stubAccepts();
+    const mw = x402Middleware({
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
+      routePricing: () => [
+        { amount: '500000' },
+        { amount: '100000', asset: USDM_PREPROD_ASSET },
+      ],
+    });
+    await mw(mockReq({ path: '/foo' }), mockRes() as unknown as Response, jest.fn());
+    const call = mockProcess.mock.calls[0]![0] as {
+      requirementsBody: { accepts: Array<{ amount: string; asset: string }> };
+    };
+    expect(call.requirementsBody.accepts).toHaveLength(2);
+    expect(call.requirementsBody.accepts[0]!.asset).toBe('lovelace');
+    expect(call.requirementsBody.accepts[1]!.asset).toBe(USDM_PREPROD_ASSET);
+  });
+
+  it('returns 500 + next(err) when the resolver throws', async () => {
+    const mw = x402Middleware({
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
+      routePricing: () => { throw new Error('pricing DB down'); },
+    });
+    const next = jest.fn();
+    await mw(mockReq({ path: '/foo' }), mockRes() as unknown as Response, next);
+    expect(next).toHaveBeenCalledWith(expect.any(Error));
+    expect(mockProcess).not.toHaveBeenCalled();
   });
 });
 

@@ -11,13 +11,17 @@ jest.mock('../../srv/bridge', () => bridgeFactory());
 
 import * as bridge from '../../srv/bridge';
 import { process as verifyPayment } from '../../srv/facilitator/verify';
-import { buildPaymentRequirements } from '../../srv/core/requirements';
+import {
+  buildPaymentRequirements,
+  buildPaymentRequirementsMulti,
+} from '../../srv/core/requirements';
 import { Codes } from '../../srv/core/errors';
 import {
   BUYER_PRIV, SELLER_ADDR,
   NONCE_TX_HASH, NONCE_INDEX, NONCE_REF,
   CURRENT_SLOT, FUTURE_SLOT,
   NETWORK_PREPROD,
+  USDM_PREPROD_ASSET, USDM_PREPROD_POLICY, USDM_NAME_HEX,
 } from '../fixtures/constants';
 import { buildBody, signTx } from '../fixtures/build-tx';
 import { buildEnvelope } from '../fixtures/envelope';
@@ -173,6 +177,62 @@ describe('verifyPayment, pending', () => {
       expect(r.code).toBe(Codes.PENDING);
       expect(r.txHash).toBe(decoded.txHash);
     }
+  });
+});
+
+describe('verifyPayment, multi-accept', () => {
+  it('selects the native-asset entry when the buyer paid in USDM', async () => {
+    // Build a tx that pays USDM (with min-ADA) to the seller.
+    const body = buildBody({
+      inputs:  [{ txHash: NONCE_TX_HASH, outputIndex: NONCE_INDEX }],
+      outputs: [{
+        address:  SELLER_ADDR,
+        lovelace: '1500000', // min-ADA for an asset-bearing output
+        assets:   [{ policyId: USDM_PREPROD_POLICY, nameHex: USDM_NAME_HEX, qty: '100000' }],
+      }],
+      ttlSlot: FUTURE_SLOT,
+    });
+    const signed = signTx(body, [BUYER_PRIV]);
+    const envelope = buildEnvelope({ txCborHex: signed.cborHex, nonceRef: NONCE_REF });
+
+    // Server advertises BOTH ADA and USDM as accepted options.
+    const reqs = buildPaymentRequirementsMulti({
+      payTo:    SELLER_ADDR,
+      network:  NETWORK_PREPROD,
+      resource: '/r',
+      options: [
+        { amount: '500000', asset: 'lovelace' },         // also offered
+        { amount: '100000', asset: USDM_PREPROD_ASSET }, // ← what got paid
+      ],
+    });
+
+    const { decode } = await import('../../srv/core/decode');
+    const decoded = decode(envelope);
+    mockedBridge.submitTransaction.mockResolvedValue(decoded.txHash);
+    mockedBridge.getTransactionByHash.mockResolvedValue({ hash: 'ok' } as unknown);
+
+    const r = await verifyPayment({ paymentHeader: envelope, requirementsBody: reqs });
+    expect(r.kind).toBe('accepted');
+    if (r.kind === 'accepted') {
+      expect(r.payment.asset).toBe(USDM_PREPROD_ASSET);
+      expect(r.payment.amountUnits).toBe('100000');
+    }
+  });
+
+  it('rejects with wrong_asset when no multi-accept entry matches the paid asset', async () => {
+    // Buyer pays plain ADA; server demands a native token.
+    const envelope = happyEnvelope({ amount: '1000000' });
+    const reqs = buildPaymentRequirementsMulti({
+      payTo:    SELLER_ADDR,
+      network:  NETWORK_PREPROD,
+      resource: '/r',
+      options: [
+        { amount: '1', asset: USDM_PREPROD_ASSET },
+      ],
+    });
+    const r = await verifyPayment({ paymentHeader: envelope, requirementsBody: reqs });
+    expect(r.kind).toBe('rejected');
+    if (r.kind === 'rejected') expect(r.code).toBe(Codes.WRONG_ASSET);
   });
 });
 

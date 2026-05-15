@@ -29,6 +29,7 @@ import type {
   DecodedPayment,
   DecodedOutput,
   PaymentRequirementEntry,
+  PaymentRequirementsBody,
   PaymentClaim,
   Network,
 } from './types';
@@ -187,8 +188,98 @@ export function validatePayment(
       network,
       unit,
       asset:       requirements.asset,
+      payTo:       requirements.payTo,
       resourceUrl: requirements.resource.url,
       nonceRef:    `${decoded.nonce.txHash}#${decoded.nonce.index}`,
     },
+  };
+}
+
+// ─── Multi-accept selector ───────────────────────────────────────────────
+
+export type PickResult =
+  | { ok: true; entry: PaymentRequirementEntry }
+  | { ok: false; code: X402Code; reason: string };
+
+/**
+ * Select the `accepts[]` entry the buyer actually paid against.
+ *
+ * Algorithm (first-match wins, accepts[] is the seller's preference order):
+ *   1. Filter by network , the buyer's envelope declares one network and
+ *      we discard entries that don't match.
+ *   2. For each remaining entry, look for an output to `entry.payTo`
+ *      containing `entry.asset` with quantity ≥ 1. We don't enforce the
+ *      full `amount` here, that's `validatePayment`'s job, we just need
+ *      enough signal to know *which* entry the buyer chose.
+ *   3. First hit wins. No hit ⇒ `wrong_asset` with a composite reason.
+ *
+ * For a single-entry `accepts[]`, this returns `accepts[0]` if the
+ * network matches, mirroring the pre-multi-accept behaviour exactly.
+ */
+export function pickRequirement(
+  decoded: DecodedPayment,
+  body: PaymentRequirementsBody,
+): PickResult {
+  if (!body.accepts || body.accepts.length === 0) {
+    return { ok: false, code: Codes.WRONG_ASSET, reason: 'PaymentRequirementsBody.accepts is empty' };
+  }
+
+  const networkOk = body.accepts.filter((e) =>
+    networksMatch(decoded.envelope.network, e.network),
+  );
+  if (networkOk.length === 0) {
+    return {
+      ok:     false,
+      code:   Codes.NETWORK_MISMATCH,
+      reason: `payment network '${decoded.envelope.network}' does not match any accepts[].network`,
+    };
+  }
+
+  // Single-entry shortcut: hand back the lone matching entry, the
+  // subsequent validatePayment will run the strict per-entry checks
+  // (recipient, amount, asset, ...) just as it did pre-multi-accept.
+  if (networkOk.length === 1) {
+    return { ok: true, entry: networkOk[0]! };
+  }
+
+  // Non-lovelace assets are an unambiguous signal: an output that
+  // carries policy X is paying in policy X. Lovelace is ambiguous,
+  // EVERY native-asset output to the seller also carries min-ADA in
+  // lovelace just to be valid on chain. So we pass over the accepts[]
+  // in two passes:
+  //   - Pass 1: match any entry whose non-lovelace asset appears in a
+  //     payTo output. Strong signal, accept immediately.
+  //   - Pass 2: only if no native-asset entry matched, consider
+  //     lovelace entries, and only against outputs that are pure ADA
+  //     (no native assets). That avoids charging a USDM-paying buyer
+  //     against a lovelace entry just because the min-ADA happened to
+  //     be in the output.
+  for (const entry of networkOk) {
+    const parsed = parseAsset(entry.asset);
+    if (parsed.isLovelace) continue;
+    const hit = decoded.outputs.some(
+      (o) => o.address === entry.payTo && o.assets.some((a) => a.unit === parsed.unit),
+    );
+    if (hit) return { ok: true, entry };
+  }
+  for (const entry of networkOk) {
+    const parsed = parseAsset(entry.asset);
+    if (!parsed.isLovelace) continue;
+    const hit = decoded.outputs.some(
+      (o) => o.address === entry.payTo && o.assets.length === 0 && BigInt(o.lovelace) > 0n,
+    );
+    if (hit) return { ok: true, entry };
+  }
+
+  // No entry matched. Compose a reason listing the (payTo, asset) pairs
+  // we expected, so the buyer's client can diagnose which option they
+  // tried to pay vs. what the server offered.
+  const expected = networkOk
+    .map((e) => `${e.asset}@${e.payTo}`)
+    .join(' | ');
+  return {
+    ok:     false,
+    code:   Codes.WRONG_ASSET,
+    reason: `no accepts[] entry matched the paid (payTo, asset); expected one of: ${expected}`,
   };
 }

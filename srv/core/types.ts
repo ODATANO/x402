@@ -76,6 +76,8 @@ export interface PaymentClaim {
   unit: string;
   /** The v2 asset string from requirements (passed-through for audit). */
   asset: string;
+  /** Bech32 recipient the matched requirements entry credited. */
+  payTo: string;
   /** The route / resource URL the buyer paid for. */
   resourceUrl: string;
   /** UTxO-ref nonce as `<txHash>#<index>`. */
@@ -122,3 +124,74 @@ export interface DecodedInput {
 }
 
 export type { Network };
+
+// ─── Pricing surface (multi-accept + resolver) ────────────────────────────
+
+/**
+ * One payment option inside a multi-accept route. Lets a seller advertise
+ * e.g. "0.5 ADA or 0.1 USDM" for the same route. Top-level middleware
+ * options (`payTo`, `network`, `asset`, `description`, ...) fill any
+ * field the option leaves unset.
+ *
+ * The buyer's tx picks ONE option implicitly by which (payTo, asset) it
+ * actually pays; the facilitator selects the matching entry via
+ * `pickRequirement()` before running the six validation checks against it.
+ */
+export interface RouteOption {
+  amount: string | number | bigint;
+  asset?: string;
+  payTo?: string;
+  network?: Network | string;
+  description?: string;
+  mimeType?: string;
+  assetTransferMethod?: AssetTransferMethod;
+  maxTimeoutSeconds?: number;
+  extra?: Record<string, unknown>;
+}
+
+/**
+ * What a `routePricing` entry or a `PriceResolver` may return.
+ *
+ *   - scalar             , single price in the route's default asset
+ *   - `RouteOption`      , single option with field overrides
+ *   - `RouteOption[]`    , multi-accept, buyer picks one on-chain
+ *
+ * Returning `null` from a resolver means "no gate, pass through" , the
+ * non-null type is what gates a request.
+ */
+export type PriceSpec =
+  | string
+  | number
+  | bigint
+  | RouteOption
+  | RouteOption[];
+
+/**
+ * Context passed to a `PriceResolver`. Intentionally minimal so we don't
+ * leak express/CAP-specific shapes through the public API. Both
+ * middlewares fill the common fields; CAP-only fields are optional.
+ */
+export interface PricingContext {
+  /**
+   * CAP: req.event ('READ'|'CREATE'|action-name).
+   * Express: last URL segment with OData function args stripped.
+   */
+  event: string;
+  /** CAP target name (e.g. 'PricesService.Quotes'). Undefined in Express. */
+  target?: string;
+  /** Express request path. Undefined in CAP. */
+  path?: string;
+  /** HTTP method. Express only. */
+  method?: string;
+  /** Lower-cased header map. Array values for multi-valued headers. */
+  headers: Record<string, string | string[] | undefined>;
+  /** Parsed query params (Express). */
+  query?: Record<string, string | string[] | undefined>;
+}
+
+/**
+ * Dynamic pricing function. Sync or async. Return `null` to skip the
+ * gate, a scalar / option / option-array to charge. Errors thrown here
+ * are treated as middleware failures and surface as 500 to the buyer.
+ */
+export type PriceResolver = (ctx: PricingContext) => PriceSpec | null | Promise<PriceSpec | null>;

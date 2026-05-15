@@ -24,6 +24,7 @@ import type {
   PaymentRequirementsBody,
   ResourceDescriptor,
   AssetTransferMethod,
+  RouteOption,
 } from './types';
 
 export interface BuildPaymentRequirementsArgs {
@@ -117,4 +118,72 @@ export function flatRequirements(body: PaymentRequirementsBody): PaymentRequirem
     throw new Error('flatRequirements: PaymentRequirementsBody.accepts is empty');
   }
   return body.accepts[0]!;
+}
+
+// ─── Multi-accept builder ────────────────────────────────────────────────
+
+export interface BuildMultiArgs {
+  /**
+   * Payment options the seller advertises. Buyer picks one implicitly by
+   * which (payTo, asset) the payment tx actually credits. MUST be non-empty.
+   */
+  options: RouteOption[];
+  /** Default recipient if a `RouteOption` omits `payTo`. */
+  payTo: string;
+  /** Default network if a `RouteOption` omits `network`. */
+  network: Network | string;
+  /** Default asset if a `RouteOption` omits `asset`. */
+  asset?: string;
+  resource: ResourceDescriptor | string;
+  description?: string;
+  mimeType?: string;
+  outputSchema?: unknown;
+  assetTransferMethod?: AssetTransferMethod;
+  maxTimeoutSeconds?: number;
+  extra?: Record<string, unknown>;
+  /** Same as the single-entry builder's flag. See `BuildPaymentRequirementsArgs`. */
+  withMissingHeaderError?: boolean;
+}
+
+/**
+ * Build a multi-entry `accepts[]` body. Each option inherits the
+ * top-level `payTo` / `network` / `asset` / etc. defaults unless it sets
+ * its own. The `resource` block is shared across all entries (a 402 is
+ * for one route, even when it offers many payment options).
+ *
+ * Single-entry callers should keep using `buildPaymentRequirements()`;
+ * this function is the path for the multi-accept feature.
+ */
+export function buildPaymentRequirementsMulti(args: BuildMultiArgs): PaymentRequirementsBody {
+  if (!args.options || args.options.length === 0) {
+    throw new Error('buildPaymentRequirementsMulti: options must be non-empty');
+  }
+
+  const accepts = args.options.map((opt) => {
+    const asset = opt.asset ?? args.asset;
+    if (!asset) {
+      throw new Error(
+        'buildPaymentRequirementsMulti: option is missing `asset` and no top-level default was set',
+      );
+    }
+    return buildEntry({
+      amount:               opt.amount,
+      asset,
+      payTo:                opt.payTo ?? args.payTo,
+      network:              opt.network ?? args.network,
+      resource:             args.resource,
+      description:          opt.description ?? args.description,
+      mimeType:             opt.mimeType ?? args.mimeType,
+      outputSchema:         args.outputSchema,
+      assetTransferMethod:  opt.assetTransferMethod ?? args.assetTransferMethod,
+      maxTimeoutSeconds:    opt.maxTimeoutSeconds   ?? args.maxTimeoutSeconds,
+      extra:                opt.extra              ?? args.extra,
+    });
+  });
+
+  return {
+    x402Version: 2,
+    ...(args.withMissingHeaderError ? { error: 'PAYMENT-SIGNATURE header is required' } : {}),
+    accepts,
+  };
 }

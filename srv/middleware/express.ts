@@ -19,10 +19,18 @@
 
 import cds from '@sap/cds';
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
-import { buildPaymentRequirements } from '../core/requirements';
+import { buildPaymentRequirementsMulti } from '../core/requirements';
 import { localFacilitator, type Facilitator } from '../facilitator/adapter';
 import { Codes } from '../core/errors';
-import type { AssetTransferMethod, PaymentClaim, Network } from '../core/types';
+import { resolvePrice } from './pricing';
+import type {
+  AssetTransferMethod,
+  PaymentClaim,
+  Network,
+  PriceSpec,
+  PriceResolver,
+  PricingContext,
+} from '../core/types';
 
 // Augment Express's Request so handlers downstream can read `req.payment`
 // after the middleware accepts a payment.
@@ -43,13 +51,18 @@ export interface X402MiddlewareOptions {
   /** v2 asset string: 'lovelace' or '<policy>.<nameHex>'. */
   asset: string;
   /**
-   * Single price for everything under this mount. Mutually exclusive
-   * with `routePricing` (but coexistable: routePricing wins where
-   * defined, falls back to priceUnits otherwise).
+   * Single price for everything under this mount. May be a scalar, a
+   * `RouteOption`, or a `RouteOption[]` (multi-accept).
+   * Coexists with `routePricing`: routePricing wins where defined,
+   * falls back to priceUnits otherwise.
    */
-  priceUnits?: string | number | bigint;
-  /** Per-route prices keyed by the URL's last segment. */
-  routePricing?: Record<string, string | number | bigint>;
+  priceUnits?: PriceSpec;
+  /**
+   * Per-route prices keyed by the URL's last segment, OR a dynamic
+   * `PriceResolver` function. Resolver returning `null` passes through;
+   * otherwise returns scalar / `RouteOption` / `RouteOption[]`.
+   */
+  routePricing?: Record<string, PriceSpec> | PriceResolver;
   /** Regex of paths that bypass payment (default: $metadata, $batch, root, /index). */
   skipPaths?: RegExp;
   /** Shown in `accepts[0].resource.description`. */
@@ -81,17 +94,17 @@ export interface X402MiddlewareOptions {
   facilitator?: Facilitator;
 }
 
-function pickPriceUnits(req: Request, opts: X402MiddlewareOptions): string | null {
-  if (opts.routePricing) {
-    // Last URL segment, OData function-args stripped:
-    //   /odata/v4/price/getBestPrice(pair='ADA-USD') → getBestPrice
-    const segment = (req.path.split('/').pop() ?? '').split('(')[0]!;
-    const price = opts.routePricing[segment];
-    if (price != null) return String(price);
-    if (opts.priceUnits != null) return String(opts.priceUnits);
-    return null; // unmapped under routePricing = pass through
-  }
-  return opts.priceUnits != null ? String(opts.priceUnits) : null;
+function expressContext(req: Request): PricingContext {
+  // Last URL segment with OData function-args stripped:
+  //   /odata/v4/price/getBestPrice(pair='ADA-USD') → getBestPrice
+  const segment = (req.path.split('/').pop() ?? '').split('(')[0] ?? '';
+  return {
+    event:   segment,
+    path:    req.path,
+    method:  req.method,
+    headers: req.headers as Record<string, string | string[] | undefined>,
+    query:   req.query as Record<string, string | string[] | undefined>,
+  };
 }
 
 /** Build the Express middleware. */
@@ -109,18 +122,18 @@ export function x402Middleware(opts: X402MiddlewareOptions): RequestHandler {
     try {
       if (skipPaths.test(req.path)) return next();
 
-      const priceUnits = pickPriceUnits(req, opts);
-      if (priceUnits == null) return next(); // unmapped path = pass through
+      const options = await resolvePrice(opts, expressContext(req));
+      if (options == null) return next(); // unmapped path = pass through
 
-      const requirementsBody = buildPaymentRequirements({
-        amount: priceUnits,
-        asset: opts.asset,
-        payTo: opts.payTo,
-        network: opts.network,
+      const requirementsBody = buildPaymentRequirementsMulti({
+        options,
+        asset:    opts.asset,
+        payTo:    opts.payTo,
+        network:  opts.network,
         resource: {
-          url: req.originalUrl ?? req.url,
+          url:         req.originalUrl ?? req.url,
           description: opts.description ?? '',
-          mimeType: opts.mimeType ?? 'application/json',
+          mimeType:    opts.mimeType ?? 'application/json',
         },
         ...(opts.assetTransferMethod ? { assetTransferMethod: opts.assetTransferMethod } : {}),
         ...(opts.maxTimeoutSeconds !== undefined ? { maxTimeoutSeconds: opts.maxTimeoutSeconds } : {}),

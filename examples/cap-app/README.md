@@ -4,7 +4,7 @@ Minimal CAP application demonstrating `@odatano/x402` plugin integration.
 
 ## What it shows
 
-- Plugin auto-discovery — no explicit `import '@odatano/x402'` in `srv/server.ts`. CAP finds `cds-plugin.js` in `node_modules/@odatano/x402/`.
+- Plugin auto-discovery: no explicit `import '@odatano/x402'` in `srv/server.ts`. CAP finds `cds-plugin.js` in `node_modules/@odatano/x402/`.
 - `gateService()` registering a `before('*')` handler on `PricesService`.
 - `routePricing` keyed by CAP event name (entity or action).
 - `onAccepted` callback for consumer-side audit.
@@ -16,9 +16,9 @@ Minimal CAP application demonstrating `@odatano/x402` plugin integration.
 | `/odata/v4/prices/Quotes` | GET | 0.5 ADA | gated |
 | `/odata/v4/prices/Quotes(<ID>)` | GET | 0.5 ADA | gated |
 | `/odata/v4/prices/getBestPrice(pair='ADA-USD')` | POST | 1 ADA | gated |
-| `/odata/v4/prices/Health` | GET | — | **free** (absent from routePricing) |
-| `/health` | GET | — | CAP-built-in health |
-| `/$metadata` | GET | — | bypass regex |
+| `/odata/v4/prices/Health` | GET | - | **free** (absent from routePricing) |
+| `/health` | GET | - | CAP-built-in health |
+| `/$metadata` | GET | - | bypass regex |
 
 ## Quick start
 
@@ -31,13 +31,13 @@ npm run watch
 ## Probe the gate
 
 ```bash
-# Free route — 200
+# Free route: 200
 curl http://localhost:4004/odata/v4/prices/Health
 
-# Gated route — 402 with v2 body
+# Gated route: 402 with v2 body
 curl -s http://localhost:4004/odata/v4/prices/Quotes | jq .
 
-# Gated action — 402
+# Gated action: 402
 curl -s -X POST http://localhost:4004/odata/v4/prices/getBestPrice \
   -H 'Content-Type: application/json' \
   -d '{"pair":"ADA-USD"}' | jq .

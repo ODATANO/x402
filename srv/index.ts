@@ -76,6 +76,19 @@ export {
 export { settle, type SettleArgs, type SettleResult } from './facilitator/settle';
 export { checkNonceUnspent, type NonceCheckArgs, type NonceResult } from './facilitator/nonce';
 
+// ─── Facilitator adapter (pluggable local vs hosted) ──────────────────
+export {
+  localFacilitator,
+  type Facilitator,
+  type FacilitatorVerifyAndSettleArgs,
+  type FacilitatorResult,
+  type FacilitatorSupportedResult,
+} from './facilitator/adapter';
+export {
+  httpFacilitator,
+  type HttpFacilitatorConfig,
+} from './facilitator/http';
+
 // ─── Helpers ──────────────────────────────────────────────────────────
 export {
   verifyConfirmedPayment,
@@ -92,6 +105,24 @@ export {
 // ─── Middleware ───────────────────────────────────────────────────────
 export { x402Middleware, type X402MiddlewareOptions } from './middleware/express';
 export { gateService, type X402CapOptions } from './middleware/cap';
+
+// ─── Client (HTTP wrappers that auto-handle 402) ──────────────────────
+export { x402Fetch, type X402FetchOptions } from './client/fetch';
+export { x402Axios } from './client/axios';
+export {
+  encodePaymentEnvelope,
+  type EncodeEnvelopeArgs,
+} from './client/envelope';
+export {
+  createBridgePayHandler,
+  type BridgePayHandlerOptions,
+} from './client/pay-handlers';
+export type {
+  PayHandler,
+  PayHandlerResult,
+  AcceptsSelector,
+  X402ClientOptions,
+} from './client/types';
 
 // ─── Bridge (lower-level: exposed for advanced consumers) ─────────────
 export * as bridge from './bridge';

@@ -1,10 +1,10 @@
 {
   "name": "@odatano/x402",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "x402 Cardano-v2 payment library for SAP CAP applications",
   "license": "Apache-2.0",
   "main": "srv/index.js",
-  "types": "srv/index.d.ts",
+  "types": "srv/cds-augment.d.ts",
   "publishConfig": {
     "access": "public"
   },
@@ -26,9 +26,15 @@
     "@emurgo/cardano-serialization-lib-nodejs": "^15.0.3"
   },
   "peerDependencies": {
+    "@cap-js/cds-types": ">=0.15",
     "@odatano/core": ">=1.7.8",
     "@sap/cds": ">=9",
     "express": "^4"
+  },
+  "peerDependenciesMeta": {
+    "@cap-js/cds-types": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@cap-js/cds-types": "^0.15.0",

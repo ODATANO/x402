@@ -27,7 +27,7 @@
 
 import cds from '@sap/cds';
 import { buildPaymentRequirements } from '../core/requirements';
-import { process as processX402 } from '../facilitator/verify';
+import { localFacilitator, type Facilitator } from '../facilitator/adapter';
 import { Codes } from '../core/errors';
 import type { AssetTransferMethod, Network, PaymentClaim } from '../core/types';
 
@@ -58,6 +58,12 @@ export interface X402CapOptions {
    * builder to embed pair / entity id in the resource string.
    */
   resourceUrl?: (req: cds.Request) => string;
+  /**
+   * Facilitator implementation handling verify+settle. Default
+   * `localFacilitator()` — in-process via `@odatano/core`. Use
+   * `httpFacilitator({ url, apiKey })` to delegate to a hosted service.
+   */
+  facilitator?: Facilitator;
 }
 
 type AnyCapService = {
@@ -123,6 +129,7 @@ export function gateService<S extends cds.Service>(srv: S, opts: X402CapOptions)
   if (opts.priceUnits == null && !opts.routePricing) {
     throw new Error('gateService: priceUnits or routePricing is required');
   }
+  const facilitator = opts.facilitator ?? localFacilitator();
 
   (srv as unknown as AnyCapService).before('*', async function x402CapGate(req: cds.Request) {
     const priceUnits = pickPriceUnits(req, opts);
@@ -145,7 +152,7 @@ export function gateService<S extends cds.Service>(srv: S, opts: X402CapOptions)
     });
 
     const headerVal = getHeader(req, 'payment-signature');
-    const processArgs: Parameters<typeof processX402>[0] = {
+    const processArgs: Parameters<Facilitator['verifyAndSettle']>[0] = {
       paymentHeader: headerVal,
       requirementsBody,
     };
@@ -161,9 +168,9 @@ export function gateService<S extends cds.Service>(srv: S, opts: X402CapOptions)
     //     trapped here — `req.reject` MUST be called outside this catch
     //     because it throws synchronously, and re-catching that throw
     //     would translate the 402 into a 500. ─────────────────────────
-    let result: Awaited<ReturnType<typeof processX402>>;
+    let result: Awaited<ReturnType<Facilitator['verifyAndSettle']>>;
     try {
-      result = await processX402(processArgs);
+      result = await facilitator.verifyAndSettle(processArgs);
     } catch (err) {
       log.error('x402 CAP gate internal error', err);
       // `reject` throws; we DO NOT wrap this in another try/catch.

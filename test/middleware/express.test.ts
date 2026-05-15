@@ -210,3 +210,28 @@ describe('x402Middleware — internal errors', () => {
     expect(next).toHaveBeenCalledWith(expect.any(Error));
   });
 });
+
+describe('x402Middleware — facilitator injection', () => {
+  it('uses the injected facilitator instead of the default localFacilitator', async () => {
+    // The module-level mock of `verify.process` would normally catch
+    // the default path. A custom facilitator must bypass it entirely.
+    const customVerifyAndSettle = jest.fn().mockResolvedValue({
+      kind: 'rejected',
+      code: 'wrong_recipient',
+      reason: 'custom-fac saw nope',
+      requirementsBody: { x402Version: 2, accepts: [] },
+    });
+    const mw = x402Middleware({
+      ...baseOpts,
+      facilitator: { verifyAndSettle: customVerifyAndSettle },
+    });
+    const next = jest.fn();
+    const res = mockRes();
+    await mw(mockReq({ headers: { 'payment-signature': 'AAA' } }), res as unknown as Response, next);
+
+    expect(customVerifyAndSettle).toHaveBeenCalledTimes(1);
+    expect(mockProcess).not.toHaveBeenCalled();       // default path skipped
+    expect(res.statusCode).toBe(402);
+    expect(next).not.toHaveBeenCalled();
+  });
+});

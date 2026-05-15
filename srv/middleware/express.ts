@@ -20,7 +20,7 @@
 import cds from '@sap/cds';
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { buildPaymentRequirements } from '../core/requirements';
-import { process as processX402 } from '../facilitator/verify';
+import { localFacilitator, type Facilitator } from '../facilitator/adapter';
 import { Codes } from '../core/errors';
 import type { AssetTransferMethod, PaymentClaim, Network } from '../core/types';
 
@@ -72,6 +72,13 @@ export interface X402MiddlewareOptions {
    * block serving the response.
    */
   onAccepted?: (claim: PaymentClaim, req: Request) => void | Promise<void>;
+  /**
+   * Facilitator implementation handling verify+settle. Default
+   * `localFacilitator()` — runs the pipeline in-process via
+   * `@odatano/core`. Use `httpFacilitator({ url, apiKey })` to delegate
+   * to a hosted service.
+   */
+  facilitator?: Facilitator;
 }
 
 function pickPriceUnits(req: Request, opts: X402MiddlewareOptions): string | null {
@@ -95,7 +102,8 @@ export function x402Middleware(opts: X402MiddlewareOptions): RequestHandler {
   if (opts.priceUnits == null && !opts.routePricing) {
     throw new Error('x402Middleware: priceUnits or routePricing is required');
   }
-  const skipPaths = opts.skipPaths ?? /(^\/?$|\$metadata|\$batch|^\/?\?|^\/index)/i;
+  const skipPaths   = opts.skipPaths ?? /(^\/?$|\$metadata|\$batch|^\/?\?|^\/index)/i;
+  const facilitator = opts.facilitator ?? localFacilitator();
 
   return async function x402Express(req: Request, res: Response, next: NextFunction) {
     try {
@@ -121,7 +129,7 @@ export function x402Middleware(opts: X402MiddlewareOptions): RequestHandler {
       });
 
       const headerVal = req.headers['payment-signature'];
-      const processArgs: Parameters<typeof processX402>[0] = {
+      const processArgs: Parameters<Facilitator['verifyAndSettle']>[0] = {
         paymentHeader: headerVal,
         requirementsBody,
       };
@@ -133,7 +141,7 @@ export function x402Middleware(opts: X402MiddlewareOptions): RequestHandler {
         processArgs.onAccepted = (claim) => opts.onAccepted!(claim, req);
       }
 
-      const result = await processX402(processArgs);
+      const result = await facilitator.verifyAndSettle(processArgs);
 
       if (result.kind === 'accepted') {
         res.setHeader('X-PAYMENT-RESPONSE', result.paymentResponseB64);

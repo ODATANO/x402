@@ -1,5 +1,10 @@
 # @odatano/x402
 
+[![npm](https://img.shields.io/npm/v/@odatano/x402?color=cb3837&logo=npm)](https://www.npmjs.com/package/@odatano/x402)
+[![tests](https://github.com/ODATANO/x402/actions/workflows/test.yaml/badge.svg)](https://github.com/ODATANO/x402/actions/workflows/test.yaml)
+[![@odatano/core](https://img.shields.io/github/package-json/dependency-version/ODATANO/x402/peer/@odatano/core?label=%40odatano%2Fcore&color=0e7c66)](https://www.npmjs.com/package/@odatano/core)
+[![spec](https://img.shields.io/badge/Cardano--x402-v2-blueviolet)](https://github.com/masumi-network/x402-cardano)
+
 x402 payment gating for SAP CAP applications, backed by Cardano.
 
 Wire a single `before('*')` hook into your CAP service. Every gated request returns **HTTP 402 Payment Required** until the caller proves on-chain settlement. Asset-agnostic: pay in ADA, USDM, or any native asset.

@@ -3,7 +3,7 @@
  *
  * CAP services receive requests through `srv.before(...)` / `srv.on(...)`
  * handlers, not Express middleware. For OData-served entities, the 402
- * needs to come from `req.reject(402, body)` — the response is built by
+ * needs to come from `req.reject(402, body)`, the response is built by
  * CAP, not by `res.status(...)`.
  *
  * Usage:
@@ -60,7 +60,7 @@ export interface X402CapOptions {
   resourceUrl?: (req: cds.Request) => string;
   /**
    * Facilitator implementation handling verify+settle. Default
-   * `localFacilitator()` — in-process via `@odatano/core`. Use
+   * `localFacilitator()`, in-process via `@odatano/core`. Use
    * `httpFacilitator({ url, apiKey })` to delegate to a hosted service.
    */
   facilitator?: Facilitator;
@@ -119,7 +119,7 @@ function getResourceUrl(req: cds.Request, opts: X402CapOptions): string {
  *
  * The gate registers as `srv.before('*', ...)` which fires for every
  * event on the service. We filter inside the handler based on
- * `routePricing` — registering per-entity would lose actions, and
+ * `routePricing`, registering per-entity would lose actions, and
  * per-event arrays don't support the `'*'` fallback we want.
  */
 export function gateService<S extends cds.Service>(srv: S, opts: X402CapOptions): S {
@@ -165,7 +165,7 @@ export function gateService<S extends cds.Service>(srv: S, opts: X402CapOptions)
     }
 
     // ─── Run the pipeline. Only the orchestrator's internal errors are
-    //     trapped here — `req.reject` MUST be called outside this catch
+    //     trapped here, `req.reject` MUST be called outside this catch
     //     because it throws synchronously, and re-catching that throw
     //     would translate the 402 into a 500. ─────────────────────────
     let result: Awaited<ReturnType<Facilitator['verifyAndSettle']>>;
@@ -180,7 +180,7 @@ export function gateService<S extends cds.Service>(srv: S, opts: X402CapOptions)
     }
 
     // ─── Apply the result. From here on, `req.reject` is called once
-    //     and we let its synchronous throw bubble — CAP's dispatcher
+    //     and we let its synchronous throw bubble, CAP's dispatcher
     //     wraps it into the OData error response.
     if (result.kind === 'accepted') {
       (req as unknown as { payment?: PaymentClaim }).payment = result.payment;

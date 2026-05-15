@@ -4,7 +4,7 @@
  * Why explicit (not auto-mock): srv/bridge.ts has a top-level
  * `require('@odatano/core')` whose target package contains source .ts
  * files. Jest's auto-mock loads the original module to derive its
- * surface, which then drags in those .ts files — and ts-jest's default
+ * surface, which then drags in those .ts files, and ts-jest's default
  * `transformIgnorePatterns` skips node_modules, so they fail to parse.
  *
  * The factory below returns a jest.fn() per known export. Tests then

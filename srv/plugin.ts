@@ -2,13 +2,13 @@
  * CAP plugin registration for `@odatano/x402`.
  *
  * Unlike `@odatano/core`, this plugin doesn't auto-serve any CDS
- * entities — x402 is a library, not a service. We use the
+ * entities, x402 is a library, not a service. We use the
  * `cds.on('served')` hook only to initialise the bridge (warm up the
  * @odatano/core connection) and the `cds.on('shutdown')` hook to clean
  * up. Consumers wire middleware / gateService themselves inside their
  * own service init().
  *
- * NEVER throws on init failure — the plugin must not crash the host
+ * NEVER throws on init failure, the plugin must not crash the host
  * CAP application. Errors are logged; calls into the bridge later
  * will fail with `BRIDGE_UNAVAILABLE`.
  */

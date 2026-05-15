@@ -1,9 +1,9 @@
 /**
  * Public type surface for x402 Cardano-v2.
  *
- * The shapes here match the v2 spec excerpt in
- * `docs/x402-cardano-integration.md` (envelope, requirements, payload).
- * Keep them as the single source of truth — middleware, facilitator and
+ * The shapes here match the Cardano-x402-v2 spec (envelope, requirements,
+ * payload). See `docs/protocol.md` for the wire-level reference. Keep
+ * this file as the single source of truth: middleware, facilitator and
  * helpers all import from here.
  */
 
@@ -12,7 +12,7 @@ import type { Network } from './network';
 /** Asset-transfer method. v2 spec.  MVP supports only `default`. */
 export type AssetTransferMethod = 'default' | 'masumi' | 'script';
 
-/** v2 resource descriptor — was a bare string in v1. */
+/** v2 resource descriptor, was a bare string in v1. */
 export interface ResourceDescriptor {
   url: string;
   description: string;
@@ -51,7 +51,7 @@ export interface PaymentRequirementsBody {
 /**
  * Decoded `PAYMENT-SIGNATURE` envelope. The envelope payload references
  * a buyer-funded UTxO (the **nonce**) which must also appear in the
- * payment tx's inputs — this is the v2 replay defense, on-chain.
+ * payment tx's inputs, this is the v2 replay defense, on-chain.
  */
 export interface PaymentEnvelope {
   x402Version: 2;
@@ -60,7 +60,7 @@ export interface PaymentEnvelope {
   payload: {
     /** base64 CBOR of the signed payment tx */
     transaction: string;
-    /** `<txHash>#<outputIndex>` — UTxO acting as replay nonce */
+    /** `<txHash>#<outputIndex>`, UTxO acting as replay nonce */
     nonce: string;
   };
 }

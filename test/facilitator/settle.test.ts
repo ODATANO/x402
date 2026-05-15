@@ -3,7 +3,7 @@
  * can drive each branch (success, idempotent-already-known, real
  * submit-failure, timeout-pending) deterministically.
  *
- * Real `setTimeout` is fine — tests use short poll budgets (≤ 200 ms).
+ * Real `setTimeout` is fine, tests use short poll budgets (≤ 200 ms).
  */
 
 import { bridgeFactory } from '../fixtures/mock-bridge';
@@ -21,7 +21,7 @@ beforeEach(() => {
   jest.resetAllMocks();
 });
 
-describe('settle — happy path', () => {
+describe('settle, happy path', () => {
   it('returns confirmed when submit succeeds and tx is immediately visible', async () => {
     mockedBridge.submitTransaction.mockResolvedValue(TX_HASH);
     mockedBridge.getTransactionByHash.mockResolvedValue({ hash: TX_HASH } as unknown);
@@ -47,7 +47,7 @@ describe('settle — happy path', () => {
   });
 });
 
-describe('settle — idempotency on "already known"', () => {
+describe('settle, idempotency on "already known"', () => {
   it('falls through to polling when submit says tx is in mempool', async () => {
     mockedBridge.submitTransaction.mockRejectedValue(
       new Error('Transaction is already in the mempool'),
@@ -67,7 +67,7 @@ describe('settle — idempotency on "already known"', () => {
   });
 });
 
-describe('settle — real failures', () => {
+describe('settle, real failures', () => {
   it('returns SUBMIT_FAILED on a non-recoverable submit error', async () => {
     mockedBridge.submitTransaction.mockRejectedValue(
       new Error('OutsideValidityIntervalUTxO'),
@@ -87,7 +87,7 @@ describe('settle — real failures', () => {
   });
 });
 
-describe('settle — pending on timeout', () => {
+describe('settle, pending on timeout', () => {
   it('returns pending when polling budget expires', async () => {
     mockedBridge.submitTransaction.mockResolvedValue(TX_HASH);
     mockedBridge.getTransactionByHash.mockResolvedValue(null); // never visible
@@ -105,7 +105,7 @@ describe('settle — pending on timeout', () => {
   });
 });
 
-describe('settle — validation', () => {
+describe('settle, validation', () => {
   it('throws on missing signedTxCborHex', async () => {
     await expect(settle({ signedTxCborHex: '', expectedTxHash: TX_HASH }))
       .rejects.toThrow(/signedTxCborHex/);

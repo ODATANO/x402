@@ -54,7 +54,7 @@ beforeEach(() => {
   mockedBridge.getTransactionByHash.mockResolvedValue({} as unknown);
 });
 
-describe('verifyPayment — happy path', () => {
+describe('verifyPayment, happy path', () => {
   it('returns accepted + invokes onAccepted callback', async () => {
     const onAccepted = jest.fn();
     const envelope = happyEnvelope();
@@ -88,7 +88,7 @@ describe('verifyPayment — happy path', () => {
   });
 });
 
-describe('verifyPayment — rejection branches', () => {
+describe('verifyPayment, rejection branches', () => {
   it('MISSING_HEADER when paymentHeader is undefined', async () => {
     const r = await verifyPayment({
       paymentHeader: undefined,
@@ -154,7 +154,7 @@ describe('verifyPayment — rejection branches', () => {
   });
 });
 
-describe('verifyPayment — pending', () => {
+describe('verifyPayment, pending', () => {
   it('returns pending when settle times out', async () => {
     const envelope = happyEnvelope();
     const { decode } = await import('../../srv/core/decode');
@@ -176,7 +176,7 @@ describe('verifyPayment — pending', () => {
   });
 });
 
-describe('verifyPayment — onAccepted is best-effort', () => {
+describe('verifyPayment, onAccepted is best-effort', () => {
   it('still returns accepted when onAccepted throws', async () => {
     const envelope = happyEnvelope();
     const { decode } = await import('../../srv/core/decode');

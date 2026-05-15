@@ -37,8 +37,8 @@
     }
   },
   "devDependencies": {
-    "@cap-js/cds-types": "^0.15.0",
     "@cap-js/cds-typer": "^0.38.0",
+    "@cap-js/cds-types": "^0.15.0",
     "@cap-js/sqlite": "^2",
     "@odatano/core": "^1.7.8",
     "@odatano/x402": ".",
@@ -53,6 +53,7 @@
     "jest": "^29",
     "ts-jest": "^29",
     "tsx": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "typescript-eslint": "^8.59.3"
   }
 }

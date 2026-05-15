@@ -1,5 +1,5 @@
 /**
- * `x402Axios` is tested against a hand-rolled minimal axios shim — we
+ * `x402Axios` is tested against a hand-rolled minimal axios shim, we
  * don't pull in real axios as a dev dependency just for one test file.
  * The shim faithfully reproduces the interceptor + request contract,
  * which is all `x402Axios` touches.
@@ -40,7 +40,7 @@ const REQS: PaymentRequirementsBody = {
 
 /**
  * Minimal axios-shaped client. `responses` is a FIFO queue: each
- * `request()` consumes one entry — if it has `error`, the
+ * `request()` consumes one entry, if it has `error`, the
  * onRejected interceptor fires; otherwise onFulfilled.
  */
 function makeShim(responses: Array<{ status: number; data?: unknown }>) {

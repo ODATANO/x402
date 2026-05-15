@@ -1,5 +1,5 @@
 /**
- * `x402Fetch` — drop-in fetch wrapper that auto-handles 402 responses.
+ * `x402Fetch`, drop-in fetch wrapper that auto-handles 402 responses.
  *
  * On a 402 response the wrapper:
  *   1. Parses the body as a v2 `PaymentRequirementsBody`.
@@ -10,7 +10,7 @@
  *
  * Non-402 responses are passed through untouched. After `maxRetries`
  * payment attempts, the last response (whether 402 or other) is
- * returned to the caller — never an infinite loop.
+ * returned to the caller, never an infinite loop.
  *
  * Native fetch is used by default (Node ≥18, all modern browsers).
  * Pass `opts.fetch` to override (testing, custom agents, etc.).
@@ -47,7 +47,7 @@ export function x402Fetch(opts: X402FetchOptions): FetchFn {
   return async function paidFetch(input, init) {
     let attemptsLeft = maxRetries;
     // Contextual typing from FetchFn means we don't need to spell out
-    // RequestInfo / RequestInit explicitly — those are DOM-only globals.
+    // RequestInfo / RequestInit explicitly, those are DOM-only globals.
     let nextInit = init;
 
     // Loop: original request + up-to-maxRetries payment retries.

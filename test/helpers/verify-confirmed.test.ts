@@ -23,7 +23,7 @@ beforeEach(() => {
   jest.resetAllMocks();
 });
 
-describe('verifyConfirmedPayment — input validation', () => {
+describe('verifyConfirmedPayment, input validation', () => {
   it('rejects malformed txHash', async () => {
     const r = await verifyConfirmedPayment({
       txHash: 'short',
@@ -72,7 +72,7 @@ describe('verifyConfirmedPayment — input validation', () => {
   });
 });
 
-describe('verifyConfirmedPayment — chain interactions', () => {
+describe('verifyConfirmedPayment, chain interactions', () => {
   it('returns PENDING when tx is not yet on chain', async () => {
     mockedBridge.getTransactionByHash.mockResolvedValue(null);
     const r = await verifyConfirmedPayment({

@@ -2,7 +2,7 @@
  * Submit a signed payment tx to Cardano and confirm settlement.
  *
  * Confirmation policy (v2 spec): accept after first chain sighting.
- * `mempool` status is explicitly discouraged in v2 — Cardano's
+ * `mempool` status is explicitly discouraged in v2, Cardano's
  * Ouroboros Praos has probabilistic finality, so "in mempool" gives
  * no economic guarantee. We poll for first-chain-sighting via
  * `getTransactionByHash` (resolves to non-null when Blockfrost / Koios
@@ -10,7 +10,7 @@
  *
  * Confirmation budget: middleware paths use ~60s (covers preprod's
  * worst-case block time of ~20s plus indexer lag). On timeout we
- * return `{ confirmed: false, pending: true }` — the spec contract is
+ * return `{ confirmed: false, pending: true }`, the spec contract is
  * that the buyer retries with the same `PAYMENT-SIGNATURE`. Replay
  * defense (on-chain via UTxO nonce) ensures only one retry actually
  * gets served.
@@ -39,7 +39,7 @@ export interface SettleResult {
 
 /**
  * Patterns surfaced by the submit step that mean "the tx is already
- * known to the network" — either in mempool or already mined. In
+ * known to the network", either in mempool or already mined. In
  * both cases we should NOT treat as failure; we should fall through
  * to polling.
  *
@@ -92,7 +92,7 @@ export async function settle({
   }
 
   // Cross-check: backend's hash must match our locally-computed one.
-  // If it doesn't, something is structurally off — bail loudly.
+  // If it doesn't, something is structurally off, bail loudly.
   if (submittedHash && submittedHash.toLowerCase() !== expectedTxHash.toLowerCase()) {
     return {
       confirmed: false,

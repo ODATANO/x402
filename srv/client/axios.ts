@@ -1,5 +1,5 @@
 /**
- * `x402Axios` — attach a response interceptor to an existing axios
+ * `x402Axios`, attach a response interceptor to an existing axios
  * instance so 402 responses trigger a payment and retry.
  *
  * **No hard axios dependency.** We use structural typing for the

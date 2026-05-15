@@ -1,10 +1,10 @@
 /**
  * Build the canonical Cardano-x402-v2 PaymentRequirements body.
  *
- * Asset-agnostic by design — the consumer passes a v2 asset string
+ * Asset-agnostic by design, the consumer passes a v2 asset string
  * (`<policy>.<nameHex>` or `'lovelace'`), a payTo bech32, a network, and
  * a resource descriptor. There is NO USDM default and no decimals
- * assumption — both belong to the consumer's product config.
+ * assumption, both belong to the consumer's product config.
  *
  * The v2 shape diverges from v1 in five places (see `docs/spec-v2-summary.md`
  * once written):
@@ -75,7 +75,7 @@ function normalizeResource(
 
 /**
  * Construct a single `accepts[]` entry. Most callers want
- * `buildPaymentRequirements()` which wraps this in the 402 envelope —
+ * `buildPaymentRequirements()` which wraps this in the 402 envelope ,
  * use `buildEntry()` directly when composing multi-asset accept lists.
  */
 export function buildEntry(args: BuildPaymentRequirementsArgs): PaymentRequirementEntry {
@@ -111,7 +111,7 @@ export function buildPaymentRequirements(args: BuildPaymentRequirementsArgs): Pa
   };
 }
 
-/** Pick the first `accepts[]` entry — what the validator inspects. */
+/** Pick the first `accepts[]` entry, what the validator inspects. */
 export function flatRequirements(body: PaymentRequirementsBody): PaymentRequirementEntry {
   if (!body.accepts || body.accepts.length === 0) {
     throw new Error('flatRequirements: PaymentRequirementsBody.accepts is empty');

@@ -1,5 +1,5 @@
 /**
- * @odatano/x402 — public API barrel.
+ * @odatano/x402, public API barrel.
  *
  * Cardano-x402-v2 payment library for SAP CAP applications.
  *
@@ -27,7 +27,7 @@
  *     }
  *   }
  *
- *   // 3. Programmatic — verify a confirmed payment by tx hash
+ *   // 3. Programmatic, verify a confirmed payment by tx hash
  *   import { verifyConfirmedPayment } from '@odatano/x402';
  *   const r = await verifyConfirmedPayment({
  *     txHash, requiredAmount, asset, payTo, network,

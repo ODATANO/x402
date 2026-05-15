@@ -5,7 +5,7 @@
  * Pipeline (v2):
  *   1. decode               (PAYMENT-SIGNATURE → DecodedPayment)
  *   2. validate             (6 mandatory checks, pure)
- *   3. checkNonceUnspent    (chain — UTxO still spendable)
+ *   3. checkNonceUnspent    (chain, UTxO still spendable)
  *   4. settle               (submit + poll-until-confirmed)
  *   5. onAccepted callback  (consumer-side audit, best-effort)
  *
@@ -17,7 +17,7 @@
  *     CBOR whose nonce was already spent will fail at the network
  *     level anyway, and we want to return a precise REPLAY code
  *     instead of a generic SUBMIT_FAILED.
- *   - `onAccepted` runs ONLY after settle confirms — we never call it
+ *   - `onAccepted` runs ONLY after settle confirms, we never call it
  *     for pending/rejected outcomes.
  */
 
@@ -41,19 +41,19 @@ export type ProcessKind = 'accepted' | 'rejected' | 'pending';
 export interface ProcessArgs {
   /** Raw header value (undefined if missing). */
   paymentHeader: string | string[] | undefined;
-  /** Full 402 body — the validator inspects `accepts[0]`. */
+  /** Full 402 body, the validator inspects `accepts[0]`. */
   requirementsBody: PaymentRequirementsBody;
   /** Optional override of the settle poll budget (ms). Default 60_000. */
   settlePollBudgetMs?: number;
   /**
    * Optional: callback invoked on successful payment. Use for consumer-
    * side audit (e.g. CHAINFEED writing to FeedReads, ODATAPAY writing to
-   * Receipts). Throws here are swallowed and logged — the canonical
+   * Receipts). Throws here are swallowed and logged, the canonical
    * record is on chain.
    */
   onAccepted?: (claim: PaymentClaim) => void | Promise<void>;
   /**
-   * Optional: TTL check tolerance. Default false — txs without a
+   * Optional: TTL check tolerance. Default false, txs without a
    * validity-range upper bound are rejected.
    */
   allowNoTtl?: boolean;
@@ -160,7 +160,7 @@ export async function process(args: ProcessArgs): Promise<ProcessResult> {
     };
   }
 
-  // ─── 3. Nonce — UTxO still unspent (chain) ──────────────────────────
+  // ─── 3. Nonce, UTxO still unspent (chain) ──────────────────────────
   const nonceResult = await checkNonceUnspent({
     txHash:      decoded.nonce.txHash,
     outputIndex: decoded.nonce.index,

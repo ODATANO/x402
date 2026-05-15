@@ -24,7 +24,7 @@ export interface ParsedAsset {
   assetNameHex: string;
   /**
    * Concatenation used as the canonical UTxO `unit` key by Blockfrost /
-   * Koios / ODATANO (`policyId + assetNameHex`). Empty for lovelace —
+   * Koios / ODATANO (`policyId + assetNameHex`). Empty for lovelace ,
    * comparisons against UTxO assets short-circuit via `isLovelace`.
    */
   unit: string;

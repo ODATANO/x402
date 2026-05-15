@@ -6,8 +6,8 @@
  * without paying (e.g. OData `$metadata`, `$batch` previews).
  *
  * Two pricing modes:
- *   1. `priceUnits`   — single price for everything under this mount.
- *   2. `routePricing` — { 'EntityOrActionName': 'priceUnits' }, keyed
+ *   1. `priceUnits`  , single price for everything under this mount.
+ *   2. `routePricing`, { 'EntityOrActionName': 'priceUnits' }, keyed
  *                       by the last URL segment (with OData function
  *                       args stripped). Unmapped paths pass through.
  *
@@ -74,7 +74,7 @@ export interface X402MiddlewareOptions {
   onAccepted?: (claim: PaymentClaim, req: Request) => void | Promise<void>;
   /**
    * Facilitator implementation handling verify+settle. Default
-   * `localFacilitator()` — runs the pipeline in-process via
+   * `localFacilitator()`, runs the pipeline in-process via
    * `@odatano/core`. Use `httpFacilitator({ url, apiKey })` to delegate
    * to a hosted service.
    */

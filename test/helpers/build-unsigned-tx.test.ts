@@ -2,12 +2,12 @@
  * Tests for the unsigned-payment-tx builder.
  *
  * We bridge-mock at the module level so the builder runs entirely in
- * memory — getUtxosAtAddress / getProtocolParameters / getCurrentSlot
+ * memory, getUtxosAtAddress / getProtocolParameters / getCurrentSlot
  * are all data fed by the test. This covers happy-path lovelace and
  * native-asset flows, plus the documented failure modes (no UTxOs,
  * insufficient holdings, script-payment-cred refusal, ADA padding).
  *
- * Building the actual signed CBOR would require buyer private keys —
+ * Building the actual signed CBOR would require buyer private keys ,
  * orthogonal to what THIS module does. We assert the unsigned CBOR
  * is decodable and the metadata fields are populated correctly.
  */
@@ -73,7 +73,7 @@ function tokenRequirements(amount = '10') {
   });
 }
 
-describe('buildUnsignedPaymentTx — input validation', () => {
+describe('buildUnsignedPaymentTx, input validation', () => {
   it('rejects bad bech32 address', async () => {
     mockedBridge.getUtxosAtAddress.mockResolvedValue([]);
     await expect(buildUnsignedPaymentTx({
@@ -91,7 +91,7 @@ describe('buildUnsignedPaymentTx — input validation', () => {
   });
 });
 
-describe('buildUnsignedPaymentTx — lovelace flow', () => {
+describe('buildUnsignedPaymentTx, lovelace flow', () => {
   it('picks the largest UTxO covering required + 2 ADA headroom', async () => {
     mockedBridge.getUtxosAtAddress.mockResolvedValue([
       lovelaceUtxo('500000'),                                      // too small
@@ -133,7 +133,7 @@ describe('buildUnsignedPaymentTx — lovelace flow', () => {
   });
 });
 
-describe('buildUnsignedPaymentTx — native asset flow', () => {
+describe('buildUnsignedPaymentTx, native asset flow', () => {
   it('picks largest-ADA UTxO that holds enough of the token', async () => {
     mockedBridge.getUtxosAtAddress.mockResolvedValue([
       tokenUtxo('5'),                                                   // too few tokens

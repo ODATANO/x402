@@ -9,9 +9,9 @@
  * `payload.transaction` in the PAYMENT-SIGNATURE envelope.
  *
  * Diff vs v1 of CHAINFEED's same-named helper:
- *   - Asset-agnostic — parses requirements.asset as a v2 string
+ *   - Asset-agnostic, parses requirements.asset as a v2 string
  *     (`'lovelace'` or `'<policy>.<nameHex>'`).
- *   - Returns `nonceRef` alongside the unsigned CBOR — the server
+ *   - Returns `nonceRef` alongside the unsigned CBOR, the server
  *     picks one of the buyer's chosen inputs as the v2 nonce UTxO,
  *     so the browser doesn't have to reason about it.
  *
@@ -41,7 +41,7 @@ interface ProtoParams {
 export interface BuildUnsignedTxArgs {
   /** Buyer's bech32 address (must be Base or Enterprise with VKey-hash payment cred). */
   buyerBech32: string;
-  /** A single accepts[] entry — call `flatRequirements(body)` to extract. */
+  /** A single accepts[] entry, call `flatRequirements(body)` to extract. */
   requirements: PaymentRequirementEntry;
   /**
    * Optional TTL in slots from "now" (= current chain tip slot).
@@ -53,9 +53,9 @@ export interface BuildUnsignedTxArgs {
 export interface UnsignedTxResult {
   /** CBOR hex of the unsigned tx (empty witness set). Ready for CIP-30 signTx. */
   unsignedTxCborHex: string;
-  /** Hex tx hash — what the buyer's wallet will display. */
+  /** Hex tx hash, what the buyer's wallet will display. */
   txHashHex:         string;
-  /** Buyer's payment-cred VKey hash — wallet must sign for this. */
+  /** Buyer's payment-cred VKey hash, wallet must sign for this. */
   requiredSignerHex: string;
   /** v2 nonce reference `<txHash>#<index>`, picked from the buyer's chosen inputs. */
   nonceRef:          string;
@@ -229,7 +229,7 @@ export async function buildUnsignedPaymentTx(
 
   // Pick the first input as the v2 nonce UTxO.
   // It MUST appear in tx.inputs (which it does by construction) and be
-  // unspent (which it is — we just queried it from the buyer's UTxO set).
+  // unspent (which it is, we just queried it from the buyer's UTxO set).
   const nonceInput = inputs[0]!;
   const nonceRef = `${nonceInput.txHash}#${nonceInput.outputIndex}`;
 

@@ -1,6 +1,6 @@
 /**
  * Tests for the chain-touching part of replay-defense check #5.
- * Bridge is mocked at the module level — these tests assert that the
+ * Bridge is mocked at the module level, these tests assert that the
  * facilitator interprets bridge results correctly, not that the bridge
  * itself works (that's an integration concern).
  *

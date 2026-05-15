@@ -3,8 +3,8 @@
  *
  * `createBridgePayHandler` is the default for server-to-server flows
  * (one CAP service calling another, AI-agent payments). It uses the
- * existing `buildUnsignedPaymentTx` helper — which requires
- * `@odatano/core` bridge access at runtime — and delegates signing
+ * existing `buildUnsignedPaymentTx` helper, which requires
+ * `@odatano/core` bridge access at runtime, and delegates signing
  * to a caller-supplied `signTx` callback.
  *
  * For browser CIP-30 wallets, write your own PayHandler: get UTxOs
@@ -18,7 +18,7 @@ import type { PayHandler, PayHandlerResult } from './types';
 import type { PaymentRequirementEntry } from '../core/types';
 
 export interface BridgePayHandlerOptions {
-  /** Buyer bech32 — used for UTxO lookup and change. */
+  /** Buyer bech32, used for UTxO lookup and change. */
   buyerBech32: string;
   /**
    * Sign the unsigned tx CBOR. Returns the SIGNED tx CBOR hex
@@ -39,7 +39,7 @@ export interface BridgePayHandlerOptions {
  *   2. caller-supplied `signTx` (signs the unsigned CBOR)
  *   3. returns `{ signedTxCborHex, nonceRef }`
  *
- * The signed tx is NOT submitted here — the x402 server submits it
+ * The signed tx is NOT submitted here, the x402 server submits it
  * after validating the envelope (per Cardano-x402-v2 facilitator flow).
  */
 export function createBridgePayHandler(opts: BridgePayHandlerOptions): PayHandler {

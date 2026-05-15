@@ -7,7 +7,7 @@
  * the right asset to the right address on the right network.
  *
  * Differences from the middleware path (`facilitator/verify.ts`):
- *   - No envelope, no PAYMENT-SIGNATURE header — just a tx hash.
+ *   - No envelope, no PAYMENT-SIGNATURE header, just a tx hash.
  *   - The tx is presumed already on-chain (the network already accepted
  *     witnesses), so we skip the witness-presence check.
  *   - No on-chain nonce check: replay defense for confirmed-payment

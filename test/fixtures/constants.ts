@@ -18,7 +18,7 @@ export const NETWORK_MAINNET = 'cardano:mainnet' as const;
 
 // ─── Deterministic test keys + addresses ─────────────────────────────
 function privFromSeed(seedHex: string): CSL.PrivateKey {
-  // Ed25519 extended key from a 32-byte seed. Use raw normal_bytes path —
+  // Ed25519 extended key from a 32-byte seed. Use raw normal_bytes path ,
   // deterministic, no BIP32 dance.
   return CSL.PrivateKey.from_normal_bytes(Buffer.from(seedHex, 'hex'));
 }
@@ -62,7 +62,7 @@ export const NONCE_INDEX   = 0;
 export const NONCE_REF     = `${NONCE_TX_HASH}#${NONCE_INDEX}`;
 
 // ─── Slots ───────────────────────────────────────────────────────────
-/** A representative preprod slot — used as "now" in TTL tests. */
+/** A representative preprod slot, used as "now" in TTL tests. */
 export const CURRENT_SLOT = 80_000_000;
 export const FUTURE_SLOT  = CURRENT_SLOT + 3600; // ~1h ahead
 export const PAST_SLOT    = CURRENT_SLOT - 3600; // ~1h ago

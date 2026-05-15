@@ -1,5 +1,5 @@
 /**
- * Express middleware tests. We don't spin up an actual HTTP server —
+ * Express middleware tests. We don't spin up an actual HTTP server ,
  * the middleware is just `(req, res, next) => Promise<void>`, so we
  * call it directly with hand-rolled req/res mocks and assert on the
  * side effects (status code, JSON body, headers, next() called).
@@ -60,7 +60,7 @@ const baseOpts = {
 
 beforeEach(() => { jest.resetAllMocks(); });
 
-describe('x402Middleware — argument validation', () => {
+describe('x402Middleware, argument validation', () => {
   it('throws if payTo missing', () => {
     expect(() => x402Middleware({ ...baseOpts, payTo: '' as never })).toThrow(/payTo/);
   });
@@ -76,7 +76,7 @@ describe('x402Middleware — argument validation', () => {
   });
 });
 
-describe('x402Middleware — bypass paths', () => {
+describe('x402Middleware, bypass paths', () => {
   it('passes through default-skipped OData $metadata', async () => {
     const mw = x402Middleware(baseOpts);
     const req = mockReq({ path: '/$metadata' });
@@ -107,7 +107,7 @@ describe('x402Middleware — bypass paths', () => {
   });
 });
 
-describe('x402Middleware — pricing resolution', () => {
+describe('x402Middleware, pricing resolution', () => {
   it('strips OData function args from segment for routePricing lookup', async () => {
     mockProcess.mockResolvedValue({ kind: 'rejected', code: Codes.MISSING_HEADER, reason: 'r',
       requirementsBody: { x402Version: 2, error: 'PAYMENT-SIGNATURE header is required', accepts: [] } });
@@ -121,7 +121,7 @@ describe('x402Middleware — pricing resolution', () => {
   });
 });
 
-describe('x402Middleware — 402 paths', () => {
+describe('x402Middleware, 402 paths', () => {
   it('returns 402 with requirements body on missing header', async () => {
     mockProcess.mockResolvedValue({
       kind: 'rejected',
@@ -181,7 +181,7 @@ describe('x402Middleware — 402 paths', () => {
   });
 });
 
-describe('x402Middleware — accepted path', () => {
+describe('x402Middleware, accepted path', () => {
   it('sets X-PAYMENT-RESPONSE and calls next()', async () => {
     mockProcess.mockResolvedValue({
       kind: 'accepted',
@@ -201,7 +201,7 @@ describe('x402Middleware — accepted path', () => {
   });
 });
 
-describe('x402Middleware — internal errors', () => {
+describe('x402Middleware, internal errors', () => {
   it('calls next(err) when process throws unexpectedly', async () => {
     mockProcess.mockRejectedValue(new Error('boom'));
     const mw = x402Middleware(baseOpts);
@@ -211,7 +211,7 @@ describe('x402Middleware — internal errors', () => {
   });
 });
 
-describe('x402Middleware — facilitator injection', () => {
+describe('x402Middleware, facilitator injection', () => {
   it('uses the injected facilitator instead of the default localFacilitator', async () => {
     // The module-level mock of `verify.process` would normally catch
     // the default path. A custom facilitator must bypass it entirely.

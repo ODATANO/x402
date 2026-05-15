@@ -1,11 +1,11 @@
 import cds from '@sap/cds/eslint.config.mjs'
+import tseslint from 'typescript-eslint'
 
 export default [
   // Skip tsc-emitted artefacts and generated/build directories.
   // tsc emits .js/.d.ts next to the .ts sources (outDir: ".") and
   // preserves `// eslint-disable-next-line @typescript-eslint/...`
-  // comments. eslint doesn't load the TS plugin for plain .js, so
-  // those disable directives raise "rule not found" if we lint them.
+  // comments. Linting those compiled files yields false positives.
   {
     ignores: [
       'srv/**/*.js',
@@ -21,5 +21,8 @@ export default [
       'gen/**',
     ],
   },
+  // @sap/cds defaults cover .js/.cjs/.mjs only; we extend with the
+  // TypeScript-ESLint recommended set so .ts sources actually get linted.
   ...cds.recommended,
+  ...tseslint.configs.recommended,
 ]

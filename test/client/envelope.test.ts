@@ -1,6 +1,6 @@
 /**
  * `encodePaymentEnvelope` is the inverse of `srv/core/decode.ts`. The
- * critical assertion is the roundtrip — anything `encodePaymentEnvelope`
+ * critical assertion is the roundtrip, anything `encodePaymentEnvelope`
  * produces must be accepted by `decode()` with all fields preserved.
  */
 

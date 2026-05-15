@@ -12,7 +12,7 @@
  *     }
  *   }))
  *
- * The decoder is **pure** — no chain calls, no DB. It produces a
+ * The decoder is **pure**, no chain calls, no DB. It produces a
  * `DecodedPayment` that downstream `validate.ts` checks against
  * `PaymentRequirementEntry` (the 6 mandatory checks).
  */
@@ -33,7 +33,7 @@ const NONCE_RE          = /^([0-9a-f]{64})#(\d+)$/i;
 
 function decodeBase64ToBuffer(s: string, errCode: X402Code): Buffer {
   // Node's Buffer.from is lenient (silently drops bad chars). Re-encode
-  // and compare modulo padding to catch malformed input early — otherwise
+  // and compare modulo padding to catch malformed input early, otherwise
   // garbage in `transaction` would only fail at CBOR parse time with a
   // confusing error.
   const buf = Buffer.from(s, 'base64');
@@ -97,7 +97,7 @@ function extractInputs(txBody: CSL.TransactionBody): DecodedInput[] {
 /**
  * Pull validity range bounds. CSL exposes `ttl()` (upper) since Shelley
  * and `validity_start_interval_bignum()` (lower) since Allegra. Both can
- * be absent — in which case we return null and the TTL check is skipped
+ * be absent, in which case we return null and the TTL check is skipped
  * (per v2 spec: only validate TTL if buyer set one).
  */
 function extractValidityRange(txBody: CSL.TransactionBody): {
@@ -155,7 +155,7 @@ function parseNonceRef(nonce: string): { txHash: string; index: number } {
 
 /**
  * Decode a `PAYMENT-SIGNATURE` header value end-to-end. Throws X402Error
- * with a precise `code` on any malformed input — the caller catches and
+ * with a precise `code` on any malformed input, the caller catches and
  * surfaces the code in the 402 response body.
  */
 export function decode(paymentHeader: string | undefined | null): DecodedPayment {
@@ -194,7 +194,7 @@ export function decode(paymentHeader: string | undefined | null): DecodedPayment
   }
 
   // 3. Tx CBOR → CSL Transaction (parses both `transaction` and `fixed`
-  //    representation; we need both — Transaction for body access,
+  //    representation; we need both, Transaction for body access,
   //    FixedTransaction for byte-stable hash).
   const txBuf = decodeBase64ToBuffer(payload.transaction, Codes.INVALID_CBOR);
   let tx: CSL.Transaction;

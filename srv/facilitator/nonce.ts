@@ -1,7 +1,7 @@
 /**
  * Cardano-x402-v2 replay-defense check (mandatory check #5).
  *
- * v1 had a CDS entity `X402PaymentNonces` with a UNIQUE on txHash —
+ * v1 had a CDS entity `X402PaymentNonces` with a UNIQUE on txHash ,
  * replay defense was a DB UNIQUE-constraint race. v2 moves replay
  * defense **on-chain**: the buyer references a specific UTxO in the
  * envelope (`payload.nonce = "<txHash>#<index>"`), that UTxO must
@@ -9,14 +9,14 @@
  * UTxO is permanently consumed. No DB table needed.
  *
  * Check #5 has two parts:
- *   - 5a — the nonce UTxO appears in the tx inputs   (in validate.ts, pure)
- *   - 5b — the nonce UTxO is still unspent on chain  (here, chain-touching)
+ *   - 5a, the nonce UTxO appears in the tx inputs   (in validate.ts, pure)
+ *   - 5b, the nonce UTxO is still unspent on chain  (here, chain-touching)
  *
  * Order in the pipeline: `validate.ts` (which runs 5a) MUST run before
  * `checkNonceUnspent` here. The chain-touching call below is a single
  * `bridge.isUtxoUnspent` round-trip, backed by Blockfrost `consumed_by`
  * / Koios `is_spent` / Ogmios `queryLedgerState/utxo`. Spent and
- * nonexistent UTxOs both surface as `false` — both translate to REPLAY.
+ * nonexistent UTxOs both surface as `false`, both translate to REPLAY.
  */
 
 import * as bridge from '../bridge';

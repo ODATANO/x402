@@ -51,7 +51,7 @@ function fakeService() {
  *   - a CRUD call:     makeReq({ event: 'READ', entity: 'Prices' })
  *
  * `entity` is the unqualified segment that routePricing keys against
- * (CAP exposes it as `req.target.name === 'Svc.Entity'` — the gate
+ * (CAP exposes it as `req.target.name === 'Svc.Entity'`, the gate
  * splits and takes the last segment).
  */
 function makeReq(opts: { event: string; entity?: string; headers?: Record<string, string> }): CapturedReq {
@@ -69,7 +69,7 @@ function makeReq(opts: { event: string; entity?: string; headers?: Record<string
 
 beforeEach(() => { jest.resetAllMocks(); });
 
-describe('gateService — argument validation', () => {
+describe('gateService, argument validation', () => {
   const { srv } = fakeService();
   it('throws when payTo missing', () => {
     expect(() => gateService(srv as never, { network: NETWORK_PREPROD, asset: 'lovelace', priceUnits: 1 } as never))
@@ -90,7 +90,7 @@ describe('gateService — argument validation', () => {
   });
 });
 
-describe('gateService — bypass behaviour', () => {
+describe('gateService, bypass behaviour', () => {
   it('passes through events absent from routePricing (no priceUnits fallback)', async () => {
     const f = fakeService();
     gateService(f.srv as never, {
@@ -122,7 +122,7 @@ describe('gateService — bypass behaviour', () => {
   });
 });
 
-describe('gateService — 402 paths', () => {
+describe('gateService, 402 paths', () => {
   it('rejects with status 402 + JSON body on missing header', async () => {
     mockProcess.mockResolvedValue({
       kind: 'rejected', code: Codes.MISSING_HEADER, reason: '',
@@ -161,7 +161,7 @@ describe('gateService — 402 paths', () => {
   });
 });
 
-describe('gateService — accepted path', () => {
+describe('gateService, accepted path', () => {
   it('stashes claim on req and sets X-PAYMENT-RESPONSE header', async () => {
     mockProcess.mockResolvedValue({
       kind: 'accepted',
@@ -183,7 +183,7 @@ describe('gateService — accepted path', () => {
   });
 });
 
-describe('gateService — internal error path', () => {
+describe('gateService, internal error path', () => {
   it('rejects with status 500 when process throws', async () => {
     mockProcess.mockRejectedValue(new Error('boom'));
     const f = fakeService();
@@ -197,7 +197,7 @@ describe('gateService — internal error path', () => {
   });
 });
 
-describe('gateService — header lookup', () => {
+describe('gateService, header lookup', () => {
   it('reads PAYMENT-SIGNATURE from req.http.req.headers', async () => {
     mockProcess.mockResolvedValue({
       kind: 'rejected', code: Codes.MISSING_HEADER, reason: '',
@@ -214,7 +214,7 @@ describe('gateService — header lookup', () => {
   });
 });
 
-describe('gateService — custom resourceUrl', () => {
+describe('gateService, custom resourceUrl', () => {
   it('uses the resourceUrl builder when provided', async () => {
     mockProcess.mockResolvedValue({
       kind: 'rejected', code: Codes.MISSING_HEADER, reason: '',

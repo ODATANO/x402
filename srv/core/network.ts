@@ -19,7 +19,7 @@ export function isNetwork(s: unknown): s is Network {
 
 /**
  * Validate a network string and return it typed. Throws X402Error on
- * malformed input — including v1-style hyphen variants — so the caller's
+ * malformed input, including v1-style hyphen variants, so the caller's
  * 402 body carries a precise diagnostic.
  */
 export function parseNetwork(s: string): Network {

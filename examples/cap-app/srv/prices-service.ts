@@ -13,14 +13,14 @@
 import cds from '@sap/cds';
 import { gateService, type PaymentClaim } from '@odatano/x402';
 
-// Demo wallet — replace with your own preprod addr_test1...
+// Demo wallet, replace with your own preprod addr_test1...
 const PAY_TO = 'addr_test1qqetxfc069tpemq25f954mrg2rxsr9jgvqe78hvyn9zuxxdvaqvlg96unszfywdfrjwq0m8zp0m7wjza0n2pfeep5h7qw62gd8';
 
 export class PricesService extends cds.ApplicationService {
   async init() {
     const log = cds.log('example');
 
-    // x402 gate — Quotes (CRUD read) + getBestPrice (action) are priced;
+    // x402 gate, Quotes (CRUD read) + getBestPrice (action) are priced;
     // Health is absent from routePricing so it passes through.
     gateService(this, {
       payTo:   PAY_TO,
@@ -40,10 +40,10 @@ export class PricesService extends cds.ApplicationService {
       },
     });
 
-    // Action handler — runs only AFTER x402 gate accepted the payment.
+    // Action handler, runs only AFTER x402 gate accepted the payment.
     this.on('getBestPrice', (req) => {
       const pair = (req.data as { pair?: string }).pair ?? 'ADA-USD';
-      // Synthetic — a real feed would query upstream.
+      // Synthetic, a real feed would query upstream.
       return {
         pair,
         price: 0.4125,

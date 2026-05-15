@@ -1,5 +1,5 @@
 /**
- * `httpFacilitator` — delegates verify+settle to a remote HTTP service.
+ * `httpFacilitator`, delegates verify+settle to a remote HTTP service.
  *
  * Wire format (see `docs/facilitator-protocol.md` for the full reference):
  *
@@ -14,7 +14,7 @@
  * Auth: optional `apiKey` sent as `Authorization: Bearer <key>`. For
  * custom schemes (mTLS, OAuth, HMAC), pass a `headers()` builder.
  *
- * `onAccepted` cannot cross HTTP — the wrapper strips it from the wire
+ * `onAccepted` cannot cross HTTP, the wrapper strips it from the wire
  * payload and invokes it locally after the remote returns `accepted`.
  * This preserves the local-facilitator semantics exactly.
  */
@@ -31,7 +31,7 @@ type FetchFn = typeof globalThis.fetch;
 export interface HttpFacilitatorConfig {
   /** Base URL of the remote facilitator (no trailing slash required). */
   url: string;
-  /** Optional API key — sent as `Authorization: Bearer <apiKey>`. */
+  /** Optional API key, sent as `Authorization: Bearer <apiKey>`. */
   apiKey?: string;
   /**
    * Optional custom header builder, merged onto the defaults. Use for
@@ -41,7 +41,7 @@ export interface HttpFacilitatorConfig {
   /** Override the underlying fetch (testing, custom agents). */
   fetch?: FetchFn;
   /**
-   * Per-request timeout in ms. Default 90_000 — needs to be longer than
+   * Per-request timeout in ms. Default 90_000, needs to be longer than
    * the facilitator's settle-poll budget plus chain-confirmation latency.
    */
   timeoutMs?: number;
@@ -84,7 +84,7 @@ export function httpFacilitator(config: HttpFacilitatorConfig): Facilitator {
 
   return {
     async verifyAndSettle(args: FacilitatorVerifyAndSettleArgs): Promise<FacilitatorResult> {
-      // Strip `onAccepted` — not transmittable. Invoke locally after the
+      // Strip `onAccepted`, not transmittable. Invoke locally after the
       // remote settles, preserving local-facilitator semantics.
       const { onAccepted, ...wire } = args;
 
@@ -104,11 +104,11 @@ export function httpFacilitator(config: HttpFacilitatorConfig): Facilitator {
       });
 
       if (result.kind === 'accepted' && onAccepted) {
-        // Same best-effort semantics as the local facilitator —
+        // Same best-effort semantics as the local facilitator ,
         // swallow errors so accepted payments are never lost to a
         // failing audit callback.
         try { await onAccepted(result.payment); }
-        catch { /* deliberately ignored — payment already on chain */ }
+        catch { /* deliberately ignored, payment already on chain */ }
       }
       return result;
     },

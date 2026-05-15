@@ -3,31 +3,25 @@
  *
  * The x402 modules (facilitator, helpers, middleware) all import from
  * here so the underlying ODATANO surface is the only thing they couple
- * to — and so renames in core (`getTransaction` → `getTransactionByHash`)
+ * to, and so renames in core (`getTransaction` → `getTransactionByHash`)
  * stay isolated to this file.
  *
- * Two methods needed by Cardano-x402-v2 are NOT (yet) first-class on
- * `@odatano/core@1.7.7`:
- *   - `isUtxoUnspent(txHash, outputIndex)` — for replay-defense check 5b
- *   - `getCurrentSlot()`                   — for TTL check 6
+ * Two methods specific to Cardano-x402-v2 are first-class on
+ * `@odatano/core` since `1.7.8` (our minimum peer):
+ *   - `isUtxoUnspent(txHash, outputIndex)` for replay-defense check 5b
+ *   - `getCurrentSlot()`                   for TTL check 6
  *
- * Both are implemented here as **shims** on top of existing core
- * methods, so x402 works against an unmodified 1.7.7. When ODATANO
- * exposes either method natively (planned ≥1.7.8), we can swap the
- * shim for a direct call without touching downstream code.
+ * Both are called through directly here; no shim layer remains.
  */
 
 import { X402Error, Codes } from './core/errors';
 
-// We deliberately avoid `import * as odatano from '@odatano/core'` here:
-// when @odatano/core is installed as a `file:` link in dev, its source
-// .ts files end up in node_modules and TypeScript walks into them. Since
-// those source files use `#cds-models/*` imports relative to their own
-// package, type-resolution against THIS project fails.
-//
-// Workaround: declare the minimal surface we use locally and load the
-// runtime via `require()`. The published package still works the same
-// way at runtime — only the static type graph is decoupled.
+// We load `@odatano/core` via `require()` and declare the minimal
+// surface we use locally, rather than `import * as odatano from
+// '@odatano/core'`. The published `@odatano/core` ships compiled
+// `.js`/`.d.ts` only, so the project graph stays clean either way;
+// the local declaration keeps the static coupling to one file and
+// shields downstream callers from rename churn in core's barrel.
 
 // ─── Raw shapes returned by @odatano/core's normalised client ─────────
 interface RawAmount  { unit?: string; quantity?: string | number }
@@ -169,7 +163,7 @@ export async function submitTransaction(signedCborHex: string): Promise<string> 
 
 /**
  * Current chain tip slot. First-class method on `CardanoClient` since
- * `@odatano/core@1.7.8` — wraps `getLatestBlock().slot` with a
+ * `@odatano/core@1.7.8`, wraps `getLatestBlock().slot` with a
  * `ProviderUnavailableError` translation so consumers don't deal with
  * `null` slots.
  */
@@ -180,11 +174,11 @@ export async function getCurrentSlot(): Promise<number> {
 
 /**
  * Check whether a UTxO is still unspent. First-class method since
- * `@odatano/core@1.7.8` — backed by `consumed_by` (Blockfrost) /
+ * `@odatano/core@1.7.8`, backed by `consumed_by` (Blockfrost) /
  * `is_spent` (Koios) / `queryLedgerState/utxo` (Ogmios).
  *
  * Returns `false` for txs that don't exist on chain or for
- * out-of-range output indices — both are "not spendable" from the
+ * out-of-range output indices, both are "not spendable" from the
  * caller's perspective.
  */
 export async function isUtxoUnspent(
@@ -203,6 +197,6 @@ export async function isUtxoUnspent(
 // parseTransaction is exported from @odatano/core's barrel and runs
 // entirely client-side. Re-export so x402 users don't need a second
 // import for tx introspection. We declare the type loosely (unknown
-// CBOR-parsed shape) — consumers cast to ODATANO's `ParsedTransaction`
+// CBOR-parsed shape), consumers cast to ODATANO's `ParsedTransaction`
 // from `@odatano/core` directly if they need the structured fields.
 export const parseTransaction = od ? (od as unknown as { parseTransaction?: (cborHex: string) => unknown }).parseTransaction : undefined;

@@ -13,7 +13,7 @@
  *     }
  *   }))
  *
- * Pure function — no chain calls, no I/O. Callable from any runtime
+ * Pure function, no chain calls, no I/O. Callable from any runtime
  * that has `Buffer` (Node) or a polyfill (browser bundlers usually
  * provide one via `buffer`).
  */

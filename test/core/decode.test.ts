@@ -22,7 +22,7 @@ function happyPath() {
   return signTx(body, [BUYER_PRIV]);
 }
 
-describe('decode — happy path', () => {
+describe('decode, happy path', () => {
   it('decodes a well-formed v2 envelope', () => {
     const signed = happyPath();
     const header = buildEnvelope({ txCborHex: signed.cborHex, nonceRef: NONCE_REF });
@@ -89,7 +89,7 @@ describe('decode — happy path', () => {
   });
 });
 
-describe('decode — error paths', () => {
+describe('decode, error paths', () => {
   const expectThrow = (input: unknown, code: string) => {
     try { decode(input as string); }
     catch (e) {

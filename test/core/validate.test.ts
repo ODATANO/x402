@@ -53,7 +53,7 @@ function makeFixture({
   return { decoded, requirements };
 }
 
-describe('validatePayment — check 1: network', () => {
+describe('validatePayment, check 1: network', () => {
   it('rejects mismatched network', () => {
     const { decoded, requirements } = makeFixture({
       outputs: [{ address: SELLER_ADDR, lovelace: '1000000' }],
@@ -65,7 +65,7 @@ describe('validatePayment — check 1: network', () => {
   });
 });
 
-describe('validatePayment — check 2: recipient', () => {
+describe('validatePayment, check 2: recipient', () => {
   it('rejects when no output is to payTo', () => {
     const { decoded, requirements } = makeFixture({
       outputs: [{ address: BUYER_ADDR, lovelace: '1000000' }],
@@ -76,7 +76,7 @@ describe('validatePayment — check 2: recipient', () => {
   });
 });
 
-describe('validatePayment — check 3: amount', () => {
+describe('validatePayment, check 3: amount', () => {
   it('rejects insufficient amount', () => {
     const { decoded, requirements } = makeFixture({
       outputs: [{ address: SELLER_ADDR, lovelace: '500000' }],
@@ -103,7 +103,7 @@ describe('validatePayment — check 3: amount', () => {
   });
 });
 
-describe('validatePayment — check 4: asset', () => {
+describe('validatePayment, check 4: asset', () => {
   it('rejects when payTo receives only the wrong asset', () => {
     // payTo gets lovelace; requirements want a native asset
     const { decoded, requirements } = makeFixture({
@@ -135,7 +135,7 @@ describe('validatePayment — check 4: asset', () => {
   });
 });
 
-describe('validatePayment — check 5a: nonce input reference', () => {
+describe('validatePayment, check 5a: nonce input reference', () => {
   it('rejects when nonce UTxO is not referenced as a tx input', () => {
     // Build a fixture where the input txHash is NOT the nonce txHash
     const other = 'cafe'.repeat(16);
@@ -149,7 +149,7 @@ describe('validatePayment — check 5a: nonce input reference', () => {
   });
 });
 
-describe('validatePayment — check 6: TTL', () => {
+describe('validatePayment, check 6: TTL', () => {
   it('rejects expired TTL', () => {
     const { decoded, requirements } = makeFixture({
       outputs: [{ address: SELLER_ADDR, lovelace: '1000000' }],
@@ -190,7 +190,7 @@ describe('validatePayment — check 6: TTL', () => {
   });
 });
 
-describe('validatePayment — supporting: unsigned tx', () => {
+describe('validatePayment, supporting: unsigned tx', () => {
   it('rejects when no vkey witnesses present', () => {
     const { decoded, requirements } = makeFixture({
       outputs: [{ address: SELLER_ADDR, lovelace: '1000000' }],
@@ -202,7 +202,7 @@ describe('validatePayment — supporting: unsigned tx', () => {
   });
 });
 
-describe('validatePayment — happy path', () => {
+describe('validatePayment, happy path', () => {
   it('returns a populated PaymentClaim', () => {
     const { decoded, requirements } = makeFixture({
       outputs: [{ address: SELLER_ADDR, lovelace: '1000000' }],

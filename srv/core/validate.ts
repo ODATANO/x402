@@ -5,16 +5,16 @@
  * Cardano-x402-v2:
  *
  *   1. Network validation
- *   2. Recipient verification           — ≥1 output to payTo
- *   3. Amount verification              — sum of payTo outputs for asset ≥ required
- *   4. Asset verification               — exact policy + name match
+ *   2. Recipient verification          , ≥1 output to payTo
+ *   3. Amount verification             , sum of payTo outputs for asset ≥ required
+ *   4. Asset verification              , exact policy + name match
  *   5. Nonce / replay prevention
  *      - 5a. UTxO referenced by `payload.nonce` appears as a tx input
  *      - 5b. that UTxO is still unspent on chain  ← chain-touching, lives in `nonce.ts`
- *   6. TTL / expiry                     — tx.validity_range.upper_bound in future
+ *   6. TTL / expiry                    , tx.validity_range.upper_bound in future
  *
  * This module covers (1), (2), (3), (4), (5a) and (6). The chain-touching
- * part of (5) — checking the UTxO is unspent — and (5b) live in
+ * part of (5), checking the UTxO is unspent, and (5b) live in
  * `facilitator/nonce.ts` and run after this. We also keep a sanity guard
  * for "no vkey witnesses" so an unsigned CBOR is rejected with a precise
  * code rather than blowing up at submit time.
@@ -42,7 +42,7 @@ export interface ValidateOptions {
   currentSlot: number;
   /**
    * If true, allow tx with no `ttl()` set (validity-range upper bound
-   * absent). Default false — v2 spec recommends a TTL. Callers that
+   * absent). Default false, v2 spec recommends a TTL. Callers that
    * want to accept no-TTL txs (e.g. legacy wallets) opt-in.
    */
   allowNoTtl?: boolean;
@@ -101,7 +101,7 @@ export function validatePayment(
     };
   }
 
-  // Parse the asset string once — also normalises the requirement's
+  // Parse the asset string once, also normalises the requirement's
   // unit key for output comparison.
   const parsed = parseAsset(requirements.asset);
   const unit = parsed.unit; // empty when lovelace; checks short-circuit via isLovelace
@@ -140,7 +140,7 @@ export function validatePayment(
   }
 
   // ─── Check 5a: nonce UTxO appears in tx inputs ─────────────────────
-  // (5b — UTxO is unspent — runs in facilitator/nonce.ts after we've
+  // (5b, UTxO is unspent, runs in facilitator/nonce.ts after we've
   // confirmed the buyer's structural intent here.)
   const nonceInInputs = decoded.inputs.some(
     i => i.txHash === decoded.nonce.txHash && i.outputIndex === decoded.nonce.index,
@@ -155,7 +155,7 @@ export function validatePayment(
 
   // ─── Check 6: TTL / expiry ─────────────────────────────────────────
   // Slot semantics: `ttl_bignum` is the FIRST slot at which the tx is
-  // INVALID — so the tx must be submitted before that slot. We require
+  // INVALID, so the tx must be submitted before that slot. We require
   // `currentSlot < ttlSlot`; equality means the window just closed.
   if (decoded.ttlSlot === null) {
     if (!opts.allowNoTtl) {
@@ -174,7 +174,7 @@ export function validatePayment(
   }
 
   // ─── All structural checks pass ────────────────────────────────────
-  // `payerAddr` is intentionally omitted here — we don't have the
+  // `payerAddr` is intentionally omitted here, we don't have the
   // buyer's input addresses without resolving the referenced UTxOs.
   // The facilitator can fill it in via `bridge.getTransactionByHash`
   // on the nonce input, if the caller cares for audit purposes.

@@ -39,9 +39,9 @@ export const Codes = Object.freeze({
   WRONG_RECIPIENT:       'wrong_recipient',          // check 2
   INSUFFICIENT_AMOUNT:   'insufficient_amount',      // check 3
   WRONG_ASSET:           'wrong_asset',              // check 4
-  REPLAY:                'replay_detected',          // check 5 — UTxO already spent
-  NONCE_NOT_REFERENCED:  'nonce_not_referenced',     // check 5 — UTxO not in tx inputs
-  EXPIRED_TTL:           'expired_ttl',              // check 6 — validity range upper bound passed
+  REPLAY:                'replay_detected',          // check 5, UTxO already spent
+  NONCE_NOT_REFERENCED:  'nonce_not_referenced',     // check 5, UTxO not in tx inputs
+  EXPIRED_TTL:           'expired_ttl',              // check 6, validity range upper bound passed
 
   // ---- supporting ----
   UNSIGNED_TRANSACTION:  'unsigned_transaction',     // sanity: no vkey witnesses

@@ -1,5 +1,5 @@
 /**
- * `httpFacilitator` is tested with a fully mocked fetch — we never
+ * `httpFacilitator` is tested with a fully mocked fetch, we never
  * actually open a socket. The shape contract is what matters:
  *
  *   - POST /verify-settle with the args (minus onAccepted) as JSON body

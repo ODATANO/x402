@@ -7,7 +7,7 @@
  * need a specific shape (multiple outputs, lovelace-only, missing TTL,
  * etc.) compose these helpers.
  *
- * `signTestTx` uses `CSL.FixedTransaction` for the body hash — matches
+ * `signTestTx` uses `CSL.FixedTransaction` for the body hash, matches
  * how `srv/core/decode.ts` computes it, so hashes round-trip without
  * surprises.
  */
@@ -112,7 +112,7 @@ export function signTx(body: CSL.TransactionBody, signers: CSL.PrivateKey[]): Si
   };
 }
 
-/** Build an *unsigned* tx (empty witness set) — for the no-witness check. */
+/** Build an *unsigned* tx (empty witness set), for the no-witness check. */
 export function buildUnsigned(body: CSL.TransactionBody): SignedTx {
   const ftx = CSL.FixedTransaction.new_from_body_bytes(body.to_bytes());
   const hash = ftx.transaction_hash();

@@ -86,39 +86,6 @@ export class X402PaymentError extends Error {
 }
 
 /**
- * Defensively unwrap a CAP / OData error envelope around a v2 body.
- *
- * Background: `gateService` in this package historically (≤ v0.2)
- * reaches a 402 via `req.reject(402, JSON.stringify(body))`, which
- * CAP wraps into its standard OData error shape, putting the canonical
- * v2 body inside `error.message` as a JSON string:
- *
- *   { "error": { "message": "{\"x402Version\":2, ... }", "code": "402", ... } }
- *
- * The Express middleware emits the v2 body at the top level directly.
- * This helper detects the CAP wrap and returns the unwrapped candidate
- * so client wrappers can validate v2 shape uniformly. Non-CAP bodies
- * pass through untouched.
- *
- * Symmetric server-side fix (emit canonical body even through CAP) is
- * a separate concern, deferred until we can validate the CAP-version
- * specific behaviour. The unwrap below keeps `x402Fetch` /
- * `x402Axios` working against both shapes.
- */
-export function unwrapCapEnvelope(parsed: unknown): unknown {
-  if (!parsed || typeof parsed !== 'object') return parsed;
-  const maybeError = (parsed as { error?: unknown }).error;
-  if (!maybeError || typeof maybeError !== 'object') return parsed;
-  const msg = (maybeError as { message?: unknown }).message;
-  if (typeof msg !== 'string') return parsed;
-  try {
-    return JSON.parse(msg);
-  } catch {
-    return parsed;
-  }
-}
-
-/**
  * Parse the (server, canonical) error string from a `PaymentRequirementsBody`.
  *
  * The middleware encodes failures as `"<base error> (<code>): <reason>"`

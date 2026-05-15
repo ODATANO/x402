@@ -6,7 +6,6 @@ import {
   X402PaymentError,
   parseErrorCode,
   paymentErrorFromBody,
-  unwrapCapEnvelope,
 } from '../../srv/client/errors';
 import { SELLER_ADDR, NETWORK_PREPROD } from '../fixtures/constants';
 import type { PaymentRequirementsBody } from '../../srv/core/types';
@@ -64,42 +63,6 @@ describe('parseErrorCode', () => {
   it('returns undefined for empty / missing input', () => {
     expect(parseErrorCode(undefined)).toBeUndefined();
     expect(parseErrorCode('')).toBeUndefined();
-  });
-});
-
-describe('unwrapCapEnvelope', () => {
-  it('returns the input untouched when it is already a v2 body', () => {
-    expect(unwrapCapEnvelope(REQS)).toBe(REQS);
-  });
-
-  it('unwraps a CAP/OData error envelope around a v2 body', () => {
-    const wrapped = {
-      error: {
-        message: JSON.stringify(REQS),
-        code: '402',
-        '@Common.numericSeverity': 4,
-      },
-    };
-    const unwrapped = unwrapCapEnvelope(wrapped);
-    expect(unwrapped).toMatchObject({ x402Version: 2 });
-    expect((unwrapped as PaymentRequirementsBody).accepts[0]!.payTo).toBe(SELLER_ADDR);
-  });
-
-  it('returns input untouched when error.message is not JSON', () => {
-    const wrapped = { error: { message: 'plain string', code: '500' } };
-    expect(unwrapCapEnvelope(wrapped)).toBe(wrapped);
-  });
-
-  it('returns input untouched on null / non-object inputs', () => {
-    expect(unwrapCapEnvelope(null)).toBeNull();
-    expect(unwrapCapEnvelope(undefined)).toBeUndefined();
-    expect(unwrapCapEnvelope('hello')).toBe('hello');
-    expect(unwrapCapEnvelope(42)).toBe(42);
-  });
-
-  it('returns input untouched when error is not an object', () => {
-    const odd = { error: 'just a string' };
-    expect(unwrapCapEnvelope(odd)).toBe(odd);
   });
 });
 

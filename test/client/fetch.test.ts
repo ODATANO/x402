@@ -204,36 +204,6 @@ describe('x402Fetch', () => {
     expect(e.accepts).toHaveLength(1);
   });
 
-  it('unwraps CAP / OData error envelope around the v2 body and pays through it', async () => {
-    // gateService (≤ v0.2) emits 402 via req.reject, which CAP wraps in
-    // its standard OData error envelope. The unwrap path should restore
-    // the v2 body so pay + retry proceeds normally.
-    const wrapped = {
-      error: {
-        message: JSON.stringify(REQS),
-        code: '402',
-        '@Common.numericSeverity': 4,
-      },
-    };
-    const inner = jest.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify(wrapped), {
-        status: 402, headers: { 'Content-Type': 'application/json' },
-      }))
-      .mockResolvedValueOnce(res200());
-    const pay = jest.fn(async () => ({
-      signedTxCborHex: signed.cborHex, nonceRef: NONCE_REF,
-    }));
-    const paid = x402Fetch({ fetch: inner, pay });
-
-    const res = await paid('https://api.example/foo');
-    expect(res.status).toBe(200);
-    expect(pay).toHaveBeenCalledTimes(1);
-    // The pay handler must have received the unwrapped accepts[0] entry.
-    const reqEntry = pay.mock.calls[0]![0];
-    expect(reqEntry.amount).toBe('1000000');
-    expect(reqEntry.payTo).toBe(SELLER_ADDR);
-  });
-
   it('errorOnFailure: throws X402PaymentError(invalid_402_body) when body is not JSON', async () => {
     const inner = jest.fn(async () => new Response('plain text', { status: 402 }));
     const pay = jest.fn();

@@ -156,6 +156,41 @@ function getResourceUrl(req: cds.Request, opts: X402CapOptions): string {
   return httpReq.http?.req?.originalUrl ?? httpReq.http?.req?.url ?? `cap://${req.event}`;
 }
 
+type HttpRes = {
+  setHeader: (k: string, v: string) => void;
+  status: (n: number) => HttpRes;
+  json: (b: unknown) => HttpRes;
+  headersSent?: boolean;
+};
+
+function getHttpRes(req: cds.Request): HttpRes | undefined {
+  return (req as unknown as { http?: { res?: HttpRes } }).http?.res;
+}
+
+/**
+ * Emit a 402 with the canonical x402 v2 body on the wire.
+ *
+ * When an Express response is reachable we write the body ourselves so
+ * third-party x402 clients see `{ x402Version: 2, accepts: [...] }` at
+ * the top level rather than CAP's OData-wrapped `{ error: { message:
+ * "<v2-json-string>", ... } }`. The `req.reject` call is always made:
+ * its synchronous throw is what terminates CAP's handler pipeline (so
+ * the gated `on` handler never runs); CAP's own render attempt no-ops
+ * because `headersSent` is already true. Validated against `@sap/cds ^9`.
+ *
+ * For non-HTTP transports (event invocations, `$batch` reuse, tests
+ * without `http.res`) we skip the direct write and let `req.reject` do
+ * the whole job — the wrap is irrelevant when there's no HTTP buyer.
+ */
+function send402(req: cds.Request, body: Record<string, unknown>): void {
+  const httpRes = getHttpRes(req);
+  if (httpRes && !httpRes.headersSent) {
+    httpRes.status(402).json(body);
+  }
+  (req as unknown as { reject: (status: number, message: string) => void })
+    .reject(402, JSON.stringify(body));
+}
+
 /**
  * Attach the x402 gate to a CAP ApplicationService. Returns the service
  * (chainable) so callers can fluently wire multiple middlewares.
@@ -291,8 +326,7 @@ export function gateService<S extends cds.Service>(srv: S, opts: X402CapOptions)
       body.pending = true;
       if (result.txHash) body.transaction = result.txHash;
     }
-    (req as unknown as { reject: (status: number, message: string) => void })
-      .reject(402, JSON.stringify(body));
+    send402(req, body);
   });
 
   return srv;

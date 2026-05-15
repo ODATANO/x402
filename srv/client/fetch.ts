@@ -17,7 +17,7 @@
  */
 
 import { encodePaymentEnvelope } from './envelope';
-import { X402PaymentError, paymentErrorFromBody, unwrapCapEnvelope } from './errors';
+import { X402PaymentError, paymentErrorFromBody } from './errors';
 import type { X402ClientOptions } from './types';
 import type { PaymentRequirementsBody, PaymentRequirementEntry } from '../core/types';
 
@@ -67,8 +67,7 @@ export function x402Fetch(opts: X402FetchOptions): FetchFn {
           let body = lastBody;
           if (!body) {
             try {
-              const raw = await res.clone().json();
-              body = unwrapCapEnvelope(raw) as PaymentRequirementsBody;
+              body = await res.clone().json() as PaymentRequirementsBody;
             } catch { /* fall through */ }
           }
           if (body) {
@@ -85,13 +84,9 @@ export function x402Fetch(opts: X402FetchOptions): FetchFn {
 
       // Parse 402 body. If it's not a v2 PaymentRequirementsBody we
       // bail with the original response (or throw under errorOnFailure).
-      // Some servers (CAP-gated ones using req.reject) wrap the v2 body
-      // inside an OData error envelope, unwrap defensively before the
-      // x402Version check.
       let body: PaymentRequirementsBody | undefined;
       try {
-        const raw = await res.clone().json();
-        body = unwrapCapEnvelope(raw) as PaymentRequirementsBody;
+        body = await res.clone().json() as PaymentRequirementsBody;
       } catch {
         if (opts.errorOnFailure) {
           throw new X402PaymentError({

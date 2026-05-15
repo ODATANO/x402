@@ -17,7 +17,7 @@
  */
 
 import { encodePaymentEnvelope } from './envelope';
-import { X402PaymentError, paymentErrorFromBody, unwrapCapEnvelope } from './errors';
+import { X402PaymentError, paymentErrorFromBody } from './errors';
 import type { X402ClientOptions } from './types';
 import type { PaymentRequirementsBody, PaymentRequirementEntry } from '../core/types';
 
@@ -92,9 +92,7 @@ export function x402Axios<T extends AxiosInstanceLike>(
       }
       const cfg = error.config;
       const retries = Number(cfg[RETRY_KEY] ?? 0);
-      // CAP-style servers wrap the v2 body inside an OData error envelope.
-      // Defensively unwrap before validating shape.
-      const body = unwrapCapEnvelope(error.response.data) as PaymentRequirementsBody | undefined;
+      const body = error.response.data as PaymentRequirementsBody | undefined;
       const status = error.response.status;
 
       if (retries >= maxRetries) {

@@ -141,29 +141,6 @@ describe('x402Axios', () => {
     expect(calls).toHaveLength(2);
   });
 
-  it('unwraps CAP / OData error envelope around the v2 body and pays through it', async () => {
-    const wrapped = {
-      error: {
-        message: JSON.stringify(REQS),
-        code: '402',
-        '@Common.numericSeverity': 4,
-      },
-    };
-    const { instance, calls } = makeShim([
-      { status: 402, data: wrapped },
-      { status: 200, data: 'paid' },
-    ]);
-    const pay = jest.fn(async () => ({
-      signedTxCborHex: signed.cborHex, nonceRef: NONCE_REF,
-    }));
-    const client = x402Axios(instance, { pay });
-
-    const res = await client.request({ url: '/foo' }) as { status: number };
-    expect(res.status).toBe(200);
-    expect(pay).toHaveBeenCalledTimes(1);
-    expect(calls).toHaveLength(2);
-  });
-
   it('wraps pay-handler errors in X402PaymentError(pay_handler_failed)', async () => {
     const { instance } = makeShim([{ status: 402, data: REQS }]);
     const walletError = new Error('wallet cancelled');

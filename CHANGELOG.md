@@ -4,6 +4,18 @@ All notable changes to `@odatano/x402` are documented here. The format follows [
 
 **Pre-1.0 caveat:** minor versions may include breaking changes until `1.0.0`.
 
+## [0.3.1] - 2026-05-15
+
+### Fixed
+- **`gateService` now emits the canonical x402 v2 body on the wire** instead of CAP's OData-wrapped shape. The gate writes `httpRes.status(402).json(body)` directly when an Express response is reachable, then calls `req.reject(402, ...)` as the chain-terminator: the synchronous throw stops CAP's handler pipeline so the gated `on` handler never runs, and CAP's render attempt no-ops on `headersSent`. Non-HTTP transports (event invocations, `$batch` reuse) fall back to plain `req.reject`. Validated against `@sap/cds ^9`. Third-party x402 clients now interop with CAP-gated services without any unwrap shim. Closes the "Known issues" item from 0.3.0.
+
+### Removed (breaking)
+- **`unwrapCapEnvelope`** helper and its calls from `x402Fetch` / `x402Axios`. With the server fix above, the v2 body lands at the top level on the wire and the defensive unwrap is dead code. The export is gone; consumers who pulled it in (e.g. for wrapping the wrappers) should remove the import. **Pair the upgrade**: if you upgrade the `@odatano/x402` client to 0.3.1, upgrade the server in the same step, since 0.3.1 clients no longer unwrap a 0.3.0-style wrapped body.
+
+### Changed
+- `srv/middleware/cap.ts` , new `send402` helper and `getHttpRes` accessor; the one 402 emit site routes through `send402`. The two 500 `req.reject` paths (pricing-resolver throw, facilitator throw) are unchanged.
+- Test suite: 232 tests across 21 suites. CAP middleware tests gained 3 cases (canonical-wire-shape regression, `headersSent` defensive fallback, no-`http.res` transport fallback). Client tests dropped 7 cases tied to `unwrapCapEnvelope`.
+
 ## [0.3.0] - 2026-05-15
 
 ### Added
@@ -16,7 +28,7 @@ All notable changes to `@odatano/x402` are documented here. The format follows [
 - **Browser-buyer example** , `examples/browser-buyer/` Vite scaffold showing CIP-30 wallet + `x402Fetch` wiring. Documents the typical "unsigned-from-server, signed-by-wallet" architecture (server exposes `POST /pay/intent` via `buildUnsignedPaymentTx`; browser signs via CIP-30). Includes CORS notes for cross-origin deployments.
 
 ### Fixed
-- **`x402Fetch` / `x402Axios` now interop with `gateService`** out of the box. CAP's `req.reject(402, body)` wraps the canonical v2 body inside its standard OData error envelope (`{ error: { message: "<json>", code: "402", ... } }`), so previous client wrappers saw `body.x402Version === undefined` and bailed without retrying. Both clients now defensively unwrap the OData envelope before validating shape. Reported by the CHAINFEED team; matches the workaround they were shipping in `scripts/buyer-pay-and-fetch.ts`. New helper `unwrapCapEnvelope` is exported for consumers wrapping the wrappers.
+- **`x402Fetch` / `x402Axios` now interop with `gateService`** out of the box. CAP's `req.reject(402, body)` wraps the canonical v2 body inside its standard OData error envelope (`{ error: { message: "<json>", code: "402", ... } }`), so previous client wrappers saw `body.x402Version === undefined` and bailed without retrying. Both clients now defensively unwrap the OData envelope before validating shape.
 
 ### Known issues
 - The CAP `gateService` still emits 402 responses wrapped in CAP's OData error envelope on the wire (because `req.reject` is the only documented abort path). Third-party x402 clients hitting a CAP-gated server will see the wrapped shape; only `@odatano/x402`'s own clients unwrap it. Direct-write-to-`req.http.res` is the planned symmetric fix but needs validation against `@sap/cds` ^9 internals; tracked for v0.3.1.

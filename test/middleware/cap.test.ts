@@ -44,7 +44,10 @@ import { SELLER_ADDR, NETWORK_PREPROD } from '../fixtures/constants';
 interface CapturedReq {
   event: string;
   target?: { name?: string };
-  http?: { req?: { headers?: Record<string, string>; originalUrl?: string }; res?: { setHeader: jest.Mock } };
+  http?: {
+    req?: { headers?: Record<string, string>; originalUrl?: string };
+    res?: { setHeader: jest.Mock; status: jest.Mock; json: jest.Mock; headersSent?: boolean };
+  };
   reject: jest.Mock;
   payment?: unknown;
 }
@@ -78,15 +81,27 @@ function fakeService() {
  */
 function makeReq(opts: { event: string; entity?: string; headers?: Record<string, string> }): CapturedReq {
   const target = opts.entity ? { name: `PricesService.${opts.entity}` } : undefined;
+  // status/json are chainable in Express; return the same res mock from
+  // status() so `res.status(402).json(body)` works.
+  const res = { setHeader: jest.fn(), status: jest.fn(), json: jest.fn(), headersSent: false };
+  res.status.mockReturnValue(res);
+  res.json.mockReturnValue(res);
   return {
     event: opts.event,
     ...(target ? { target } : {}),
     http: {
       req: { headers: opts.headers ?? {}, originalUrl: `/odata/v4/svc/${opts.entity ?? opts.event}` },
-      res: { setHeader: jest.fn() },
+      res,
     },
+    // In real CAP this throws synchronously to abort the handler chain; in
+    // the tests we model it as a jest mock so we can assert on calls. The
+    // gate's code path is identical either way (it makes the call and returns).
     reject: jest.fn(),
   };
+}
+
+function makeReqNoHttp(opts: { event: string }): CapturedReq {
+  return { event: opts.event, reject: jest.fn() };
 }
 
 beforeEach(() => { jest.resetAllMocks(); });
@@ -197,7 +212,7 @@ describe('gateService, dynamic pricing (routePricing as function)', () => {
 });
 
 describe('gateService, 402 paths', () => {
-  it('rejects with status 402 + JSON body on missing header', async () => {
+  it('writes the canonical v2 body to httpRes (not the OData-wrapped shape)', async () => {
     mockProcess.mockResolvedValue({
       kind: 'rejected', code: Codes.MISSING_HEADER, reason: '',
       requirementsBody: { x402Version: 2, error: 'PAYMENT-SIGNATURE header is required', accepts: [] },
@@ -209,10 +224,15 @@ describe('gateService, 402 paths', () => {
     });
     const req = makeReq({ event: 'getBestPrice' });
     await f.invoke(req);
+    // Direct-write path: v2 body lands at the top level on the wire.
+    expect(req.http!.res!.status).toHaveBeenCalledWith(402);
+    const wireBody = req.http!.res!.json.mock.calls[0]![0] as { x402Version: number; accepts: unknown };
+    expect(wireBody.x402Version).toBe(2);
+    expect(wireBody.accepts).toBeDefined();
+    // req.reject is still invoked: its throw terminates CAP's handler
+    // chain, the render attempt no-ops on headersSent.
     expect(req.reject).toHaveBeenCalledTimes(1);
     expect(req.reject).toHaveBeenCalledWith(402, expect.any(String));
-    const body = JSON.parse(req.reject.mock.calls[0]![1]) as { x402Version: number };
-    expect(body.x402Version).toBe(2);
   });
 
   it('rejects with status 402 + pending markers on pending', async () => {
@@ -229,9 +249,45 @@ describe('gateService, 402 paths', () => {
     const req = makeReq({ event: 'READ', entity: 'Prices' });
     await f.invoke(req);
     expect(req.reject).toHaveBeenCalledWith(402, expect.any(String));
-    const body = JSON.parse(req.reject.mock.calls[0]![1]) as { pending: boolean; transaction: string };
-    expect(body.pending).toBe(true);
-    expect(body.transaction).toBe('ab'.repeat(32));
+    const wireBody = req.http!.res!.json.mock.calls[0]![0] as { pending: boolean; transaction: string };
+    expect(wireBody.pending).toBe(true);
+    expect(wireBody.transaction).toBe('ab'.repeat(32));
+  });
+
+  it('skips httpRes write when headersSent (defensive, falls back to req.reject)', async () => {
+    mockProcess.mockResolvedValue({
+      kind: 'rejected', code: Codes.MISSING_HEADER, reason: '',
+      requirementsBody: { x402Version: 2, error: 'X', accepts: [] },
+    });
+    const f = fakeService();
+    gateService(f.srv as never, {
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
+      priceUnits: '1',
+    });
+    const req = makeReq({ event: 'x' });
+    req.http!.res!.headersSent = true;
+    await f.invoke(req);
+    expect(req.http!.res!.status).not.toHaveBeenCalled();
+    expect(req.http!.res!.json).not.toHaveBeenCalled();
+    expect(req.reject).toHaveBeenCalledWith(402, expect.any(String));
+  });
+
+  it('falls back to req.reject for non-HTTP transports (no http.res)', async () => {
+    mockProcess.mockResolvedValue({
+      kind: 'rejected', code: Codes.MISSING_HEADER, reason: '',
+      requirementsBody: { x402Version: 2, error: 'X', accepts: [] },
+    });
+    const f = fakeService();
+    gateService(f.srv as never, {
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
+      priceUnits: '1',
+    });
+    const req = makeReqNoHttp({ event: 'x' });
+    await f.invoke(req);
+    expect(req.reject).toHaveBeenCalledTimes(1);
+    expect(req.reject).toHaveBeenCalledWith(402, expect.any(String));
+    const body = JSON.parse(req.reject.mock.calls[0]![1]) as { x402Version: number };
+    expect(body.x402Version).toBe(2);
   });
 });
 

@@ -35,7 +35,7 @@ All notable changes to `@odatano/x402` are documented here. The format follows [
 - `PaymentClaim.payTo` , verified recipient address now populated on the claim (was previously only on the requirements entry). Useful for `onAccepted` audit and receipts.
 
 ### Changed
-- Test count: 177 → 230 (HTTP-server round-trips, multi-accept + dynamic-pricing across `requirements`/`validate`/`verify`/`cap`/`express`, 4 receipts cases, 5 grants cases, 13 client-error cases).
+- Test count: 177 → 236 (HTTP-server round-trips, multi-accept + dynamic-pricing across `requirements`/`validate`/`verify`/`cap`/`express`, 4 receipts cases, 5 grants cases, 13 client-error cases).
 - `srv/middleware/{cap,express}.ts` now emit `accepts[]` via `buildPaymentRequirementsMulti()`; single-entry callers are unaffected (one-entry array produces a body byte-identical to v0.2).
 - `srv/facilitator/verify.ts` decodes the envelope BEFORE selecting a requirements entry; multi-accept depends on knowing which `(payTo, asset)` the tx actually credited.
 

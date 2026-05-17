@@ -3,7 +3,7 @@
 [![npm](https://img.shields.io/npm/v/@odatano/x402?color=cb3837&logo=npm)](https://www.npmjs.com/package/@odatano/x402)
 [![tests](https://github.com/ODATANO/x402/actions/workflows/test.yaml/badge.svg)](https://github.com/ODATANO/x402/actions/workflows/test.yaml)
 [![@odatano/core](https://img.shields.io/github/package-json/dependency-version/ODATANO/x402/peer/@odatano/core?label=%40odatano%2Fcore&color=0e7c66)](https://www.npmjs.com/package/@odatano/core)
-[![spec](https://img.shields.io/badge/Cardano--x402-v2-blueviolet)](https://github.com/masumi-network/x402-cardano)
+[![spec](https://img.shields.io/badge/Cardano--x402-v2-blueviolet)](docs/protocol.md)
 
 x402 payment gating for SAP CAP applications, backed by Cardano.
 
@@ -90,7 +90,7 @@ Configure the Cardano backend in `package.json`:
 ```bash
 npm install                # Workspace install: covers root + examples/*
 npm run build              # tsc, emits .js/.d.ts next to .ts (outDir: .)
-npm test                   # 177 tests, ~13s
+npm test                   # 232 tests, ~13s
 ```
 
 ## License

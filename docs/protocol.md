@@ -72,4 +72,4 @@ The full list of `code` values lives in [`facilitator-protocol.md`](facilitator-
 
 [x402](https://www.x402.org/) is the dormant HTTP `402 Payment Required` status code, revived. Servers respond `402` with a machine-readable body describing the price, asset, and recipient. Clients build, sign, and submit a payment, then retry the request with a `PAYMENT-SIGNATURE` header. Settlement happens on-chain.
 
-The original x402 spec is Coinbase / EVM-flavoured. The **Cardano-x402-v2** spec (in progress at [masumi-network/x402-cardano](https://github.com/masumi-network/x402-cardano)) adapts it to Cardano's UTxO model. This library is a from-scratch v2 implementation in TypeScript.
+The original x402 spec is Coinbase / EVM-flavoured. The **Cardano-x402-v2** spec adapts it to Cardano's UTxO model: `cardano:mainnet|preprod|preview` (colon-separated) network strings, `${policyId}.${assetNameHex}` asset format, and an `exact / client | facilitator | server` module split. This library is a from-scratch v2 implementation in TypeScript.

@@ -197,4 +197,48 @@ describe('x402Axios', () => {
     const { instance } = makeShim([]);
     expect(() => x402Axios(instance, { pay: undefined as never })).toThrow(/pay must be a function/);
   });
+
+  it('rethrows non-402 errors untouched', async () => {
+    const { instance } = makeShim([{ status: 500, data: { msg: 'oops' } }]);
+    const client = x402Axios(instance, { pay: jest.fn() });
+    await expect(client.request({ url: '/foo' })).rejects.toMatchObject({ response: { status: 500 } });
+  });
+
+  it('errorOnFailure: wraps invalid_402_body when JSON parses but is not v2', async () => {
+    const { instance } = makeShim([{ status: 402, data: { x402Version: 1 } }]);
+    const client = x402Axios(instance, { pay: jest.fn(), errorOnFailure: true });
+    await expect(client.request({ url: '/foo' })).rejects.toMatchObject({
+      kind: 'invalid_402_body',
+    });
+  });
+
+  it('errorOnFailure: wraps server_rejected when selectAccepts returns undefined', async () => {
+    const { instance } = makeShim([{ status: 402, data: REQS }]);
+    const client = x402Axios(instance, {
+      pay: jest.fn(),
+      errorOnFailure: true,
+      selectAccepts: () => undefined,
+    });
+    await expect(client.request({ url: '/foo' })).rejects.toBeInstanceOf(X402PaymentError);
+  });
+
+  it('without errorOnFailure: select-returns-undefined rethrows the original 402', async () => {
+    const { instance } = makeShim([{ status: 402, data: REQS }]);
+    const client = x402Axios(instance, {
+      pay: jest.fn(),
+      selectAccepts: () => undefined,
+    });
+    await expect(client.request({ url: '/foo' })).rejects.toMatchObject({ response: { status: 402 } });
+  });
+
+  it('errorOnFailure: retries_exhausted falls back to invalid_402_body when last body is not v2', async () => {
+    // Both responses lack a v2 shape, the very first attempt is rejected
+    // via "invalid_402_body" instead of looping. This exercises maybeWrap's
+    // fallback constructor (line 79).
+    const { instance } = makeShim([{ status: 402, data: 'plain string' }]);
+    const client = x402Axios(instance, { pay: jest.fn(), errorOnFailure: true });
+    await expect(client.request({ url: '/foo' })).rejects.toMatchObject({
+      kind: 'invalid_402_body',
+    });
+  });
 });

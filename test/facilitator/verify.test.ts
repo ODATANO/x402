@@ -236,6 +236,38 @@ describe('verifyPayment, multi-accept', () => {
   });
 });
 
+describe('verifyPayment, pickRequirement failure', () => {
+  it('rejects with NETWORK_MISMATCH when envelope network is not in any accepts entry', async () => {
+    const envelope = happyEnvelope();
+    // Server demands mainnet, envelope says preprod.
+    const reqs = buildPaymentRequirements({
+      amount: '1000000',
+      asset: 'lovelace',
+      payTo: SELLER_ADDR,
+      network: 'cardano:mainnet',
+      resource: '/r',
+    });
+    const r = await verifyPayment({ paymentHeader: envelope, requirementsBody: reqs });
+    expect(r.kind).toBe('rejected');
+    if (r.kind === 'rejected') expect(r.code).toBe(Codes.NETWORK_MISMATCH);
+  });
+});
+
+describe('verifyPayment, settle failure', () => {
+  it('returns rejected/SUBMIT_FAILED when submitTransaction throws with a non-already-known error', async () => {
+    mockedBridge.submitTransaction.mockRejectedValue(new Error('node refused tx: BadTx'));
+    const r = await verifyPayment({
+      paymentHeader: happyEnvelope(),
+      requirementsBody: requirementsBody(),
+    });
+    expect(r.kind).toBe('rejected');
+    if (r.kind === 'rejected') {
+      expect(r.code).toBe(Codes.SUBMIT_FAILED);
+      expect(r.reason).toMatch(/node refused/);
+    }
+  });
+});
+
 describe('verifyPayment, onAccepted is best-effort', () => {
   it('still returns accepted when onAccepted throws', async () => {
     const envelope = happyEnvelope();

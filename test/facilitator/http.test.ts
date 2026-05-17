@@ -175,4 +175,21 @@ describe('httpFacilitator', () => {
   it('throws on missing url', () => {
     expect(() => httpFacilitator({ url: '' })).toThrow(/url is required/);
   });
+
+  it('throws when no fetch implementation is available', () => {
+    const originalFetch = globalThis.fetch;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = undefined;
+    try {
+      expect(() => httpFacilitator({ url: 'https://fac.example' })).toThrow(/no fetch implementation/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('supported() throws on non-2xx response', async () => {
+    const fetchMock = jest.fn(async () => new Response('Service Unavailable', { status: 503 }));
+    const client = httpFacilitator({ url: 'https://fac.example', fetch: fetchMock });
+    await expect(client.supported!()).rejects.toThrow(/GET \/supported returned 503/);
+  });
 });

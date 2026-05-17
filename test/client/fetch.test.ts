@@ -217,4 +217,66 @@ describe('x402Fetch', () => {
   it('throws if opts.pay is missing', () => {
     expect(() => x402Fetch({ pay: undefined as never })).toThrow(/pay must be a function/);
   });
+
+  it('throws when no fetch implementation is available', () => {
+    const originalFetch = globalThis.fetch;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = undefined;
+    try {
+      expect(() => x402Fetch({ pay: jest.fn() })).toThrow(/no fetch implementation available/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('errorOnFailure + maxRetries=0: re-parses the 402 body on the no-attempts branch', async () => {
+    const errorBody = { ...REQS, error: 'payment required (replay): nonce already spent' };
+    const inner = jest.fn(async () => new Response(JSON.stringify(errorBody), { status: 402 }));
+    const paid = x402Fetch({ fetch: inner, pay: jest.fn(), maxRetries: 0, errorOnFailure: true });
+    await expect(paid('https://api.example/foo')).rejects.toMatchObject({
+      kind: 'retries_exhausted',
+      code: 'replay',
+    });
+  });
+
+  it('errorOnFailure + maxRetries=0 + unparseable body: throws retries_exhausted with no body', async () => {
+    const inner = jest.fn(async () => new Response('not-json', { status: 402 }));
+    const paid = x402Fetch({ fetch: inner, pay: jest.fn(), maxRetries: 0, errorOnFailure: true });
+    await expect(paid('https://api.example/foo')).rejects.toMatchObject({
+      kind: 'retries_exhausted',
+      message: expect.stringMatching(/no parsable 402 body/),
+    });
+  });
+
+  it('errorOnFailure: throws invalid_402_body when JSON parses but is not v2', async () => {
+    const inner = jest.fn(async () => new Response(JSON.stringify({ x402Version: 1 }), { status: 402 }));
+    const paid = x402Fetch({ fetch: inner, pay: jest.fn(), errorOnFailure: true });
+    await expect(paid('https://api.example/foo')).rejects.toMatchObject({
+      kind: 'invalid_402_body',
+    });
+  });
+
+  it('errorOnFailure: throws server_rejected when selectAccepts returns undefined', async () => {
+    const inner = jest.fn(async () => new Response(JSON.stringify(REQS), { status: 402 }));
+    const paid = x402Fetch({
+      fetch: inner,
+      pay: jest.fn(),
+      errorOnFailure: true,
+      selectAccepts: () => undefined,
+    });
+    await expect(paid('https://api.example/foo')).rejects.toMatchObject({
+      kind: 'server_rejected',
+    });
+  });
+
+  it('without errorOnFailure: select-returns-undefined falls through to the 402 response', async () => {
+    const inner = jest.fn(async () => new Response(JSON.stringify(REQS), { status: 402 }));
+    const paid = x402Fetch({
+      fetch: inner,
+      pay: jest.fn(),
+      selectAccepts: () => undefined,
+    });
+    const res = await paid('https://api.example/foo');
+    expect(res.status).toBe(402);
+  });
 });

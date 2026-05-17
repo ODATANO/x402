@@ -188,6 +188,62 @@ describe('verifyConfirmedPayment, chain interactions', () => {
   });
 });
 
+describe('verifyConfirmedPayment, defensive defaults', () => {
+  it('handles a tx with no outputs array (paid=0 → WRONG_ASSET)', async () => {
+    mockedBridge.getTransactionByHash.mockResolvedValue({} as unknown);
+    const r = await verifyConfirmedPayment({
+      txHash: VALID_TX, requiredAmount: '1', asset: 'lovelace',
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe(Codes.WRONG_ASSET);
+  });
+
+  it('handles lovelace outputs with missing lovelace field (defaults to 0)', async () => {
+    mockedBridge.getTransactionByHash.mockResolvedValue({
+      outputs: [
+        { address: SELLER_ADDR },                         // no lovelace
+        { address: SELLER_ADDR, lovelace: '500000' },     // contributes 500k
+      ],
+    } as unknown);
+    const r = await verifyConfirmedPayment({
+      txHash: VALID_TX, requiredAmount: '500000', asset: 'lovelace',
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD,
+    });
+    expect(r.ok).toBe(true);
+  });
+
+  it('handles asset entries with matching unit but no quantity field (defaults to 0)', async () => {
+    mockedBridge.getTransactionByHash.mockResolvedValue({
+      outputs: [{
+        address: SELLER_ADDR, lovelace: '1500000',
+        assets: [
+          { unit: TEST_ASSET_UNIT },                          // matches, no qty → 0
+          { unit: TEST_ASSET_UNIT, quantity: '10' },          // contributes 10
+        ],
+      }],
+    } as unknown);
+    const r = await verifyConfirmedPayment({
+      txHash: VALID_TX, requiredAmount: '10', asset: TEST_ASSET_STRING,
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD,
+    });
+    expect(r.ok).toBe(true);
+  });
+
+  it('treats non-Error bridge rejections as PENDING', async () => {
+    mockedBridge.getTransactionByHash.mockRejectedValue('plain string');
+    const r = await verifyConfirmedPayment({
+      txHash: VALID_TX, requiredAmount: '1', asset: 'lovelace',
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe(Codes.PENDING);
+      expect(r.reason).toContain('plain string');
+    }
+  });
+});
+
 // touch unused import to keep noUnusedLocals happy
 void TEST_POLICY_ID;
 void TEST_ASSET_NAME;

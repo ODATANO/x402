@@ -203,6 +203,16 @@ describe('x402Middleware, dynamic pricing (routePricing as function)', () => {
     expect(next).toHaveBeenCalledWith(expect.any(Error));
     expect(mockProcess).not.toHaveBeenCalled();
   });
+
+  it('next(err) when resolver returns an empty array (illegal RouteOption[])', async () => {
+    const mw = x402Middleware({
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
+      routePricing: () => [],
+    });
+    const next = jest.fn();
+    await mw(mockReq({ path: '/foo' }), mockRes() as unknown as Response, next);
+    expect(next).toHaveBeenCalledWith(expect.any(Error));
+  });
 });
 
 describe('x402Middleware, 402 paths', () => {
@@ -292,6 +302,63 @@ describe('x402Middleware, internal errors', () => {
     const next = jest.fn();
     await mw(mockReq(), mockRes() as unknown as Response, next);
     expect(next).toHaveBeenCalledWith(expect.any(Error));
+  });
+});
+
+describe('x402Middleware, optional process args', () => {
+  it('forwards settlePollBudgetMs to the facilitator call', async () => {
+    mockProcess.mockResolvedValue({
+      kind: 'accepted',
+      payment: { txHash: 'a'.repeat(64), amountUnits: '1000000', network: NETWORK_PREPROD,
+                 unit: '', asset: 'lovelace', resourceUrl: '/foo', nonceRef: 'x#0' },
+      paymentResponseB64: '',
+    });
+    const mw = x402Middleware({ ...baseOpts, settlePollBudgetMs: 5_000, allowNoTtl: true });
+    await mw(mockReq(), mockRes() as unknown as Response, jest.fn());
+    const arg = mockProcess.mock.calls[0]![0] as { settlePollBudgetMs?: number; allowNoTtl?: boolean };
+    expect(arg.settlePollBudgetMs).toBe(5_000);
+    expect(arg.allowNoTtl).toBe(true);
+  });
+
+  it('forwards assetTransferMethod / maxTimeoutSeconds / extra into accepts[]', async () => {
+    let captured: { accepts: Array<{ assetTransferMethod?: string; maxTimeoutSeconds?: number; extra?: unknown }> } | undefined;
+    mockProcess.mockImplementation(async (args: unknown) => {
+      captured = (args as { requirementsBody: typeof captured }).requirementsBody;
+      return {
+        kind: 'rejected', code: Codes.MISSING_HEADER, reason: 'r',
+        requirementsBody: { x402Version: 2, accepts: [] },
+      };
+    });
+    const mw = x402Middleware({
+      ...baseOpts,
+      assetTransferMethod: 'default',
+      maxTimeoutSeconds:   900,
+      extra:               { tier: 'gold' },
+    });
+    await mw(mockReq(), mockRes() as unknown as Response, jest.fn());
+    expect(captured?.accepts[0]?.assetTransferMethod).toBe('default');
+    expect(captured?.accepts[0]?.maxTimeoutSeconds).toBe(900);
+    expect(captured?.accepts[0]?.extra).toEqual({ tier: 'gold' });
+  });
+
+  it('wraps onAccepted so the user callback fires after settle', async () => {
+    const userOnAccepted = jest.fn();
+    let captured: ((c: unknown) => unknown) | undefined;
+    mockProcess.mockImplementation(async (args: unknown) => {
+      captured = (args as { onAccepted?: (c: unknown) => unknown }).onAccepted;
+      return {
+        kind: 'accepted',
+        payment: { txHash: 'a'.repeat(64), amountUnits: '1000000', network: NETWORK_PREPROD,
+                   unit: '', asset: 'lovelace', resourceUrl: '/foo', nonceRef: 'x#0' },
+        paymentResponseB64: '',
+      };
+    });
+    const mw = x402Middleware({ ...baseOpts, onAccepted: userOnAccepted });
+    await mw(mockReq(), mockRes() as unknown as Response, jest.fn());
+    expect(captured).toBeDefined();
+    // Simulate the facilitator invoking the wrapped onAccepted.
+    await captured!({ txHash: 'h' });
+    expect(userOnAccepted).toHaveBeenCalledWith({ txHash: 'h' }, expect.any(Object));
   });
 });
 

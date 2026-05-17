@@ -166,4 +166,25 @@ describe('decode, error paths', () => {
       nonceRef:  NONCE_REF,
     }), Codes.INVALID_CBOR);
   });
+
+  it('INVALID_NONCE_FORMAT when output index exceeds 65535', () => {
+    const signed = happyPath();
+    expectThrow(buildEnvelope({ txCborHex: signed.cborHex, nonceRef: NONCE_TX_HASH + '#99999' }),
+      Codes.INVALID_NONCE_FORMAT);
+  });
+});
+
+describe('decode, validity interval', () => {
+  it('decodes validity_start_interval_bignum when set on the tx', () => {
+    const body = buildBody({
+      inputs:            [{ txHash: NONCE_TX_HASH, outputIndex: NONCE_INDEX }],
+      outputs:           [{ address: SELLER_ADDR, lovelace: '1000000' }],
+      ttlSlot:           80_000_000,
+      validityStartSlot: 70_000_000,
+    });
+    const signed = signTx(body, [BUYER_PRIV]);
+    const d = decode(buildEnvelope({ txCborHex: signed.cborHex, nonceRef: NONCE_REF }));
+    expect(d.validityStartSlot).toBe(70_000_000);
+    expect(d.ttlSlot).toBe(80_000_000);
+  });
 });

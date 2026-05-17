@@ -339,6 +339,46 @@ describe('createFacilitatorRouter', () => {
     }
   });
 
+  it('returns 500 when the auth hook throws', async () => {
+    const router = createFacilitatorRouter({
+      facilitator: mockFacilitator(jest.fn() as never),
+      auth: () => { throw new Error('jwks unreachable'); },
+      logger: { warn: () => {}, error: () => {} },
+    });
+    const { url, close } = await bootApp(router);
+    try {
+      const res = await fetch(`${url}/verify-settle`, {
+        method:  'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer x' },
+        body:    JSON.stringify({ paymentHeader: 'A', requirementsBody: REQS }),
+      });
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(body.error).toMatch(/auth check failed/);
+    } finally {
+      await close();
+    }
+  });
+
+  it('returns 500 when supported() throws', async () => {
+    const router = createFacilitatorRouter({
+      facilitator: mockFacilitator(
+        jest.fn() as never,
+        async () => { throw new Error('upstream down'); },
+      ),
+      logger: { warn: () => {}, error: () => {} },
+    });
+    const { url, close } = await bootApp(router);
+    try {
+      const res = await fetch(`${url}/supported`);
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(body.error).toMatch(/upstream down/);
+    } finally {
+      await close();
+    }
+  });
+
   it('swallows onRejected hook errors', async () => {
     const router = createFacilitatorRouter({
       facilitator: mockFacilitator(async () => ({

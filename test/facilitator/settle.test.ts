@@ -114,4 +114,12 @@ describe('settle, validation', () => {
     await expect(settle({ signedTxCborHex: TX_CBOR, expectedTxHash: '' }))
       .rejects.toThrow(/expectedTxHash/);
   });
+
+  it('handles submit rejection with no message (falsy → empty string)', async () => {
+    // Tests the `String(err?.message ?? err ?? '')` fallback chain.
+    mockedBridge.submitTransaction.mockRejectedValue(undefined);
+    const r = await settle({ signedTxCborHex: TX_CBOR, expectedTxHash: TX_HASH });
+    expect(r.confirmed).toBe(false);
+    expect(r.code).toBe(Codes.SUBMIT_FAILED);
+  });
 });

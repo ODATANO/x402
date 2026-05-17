@@ -168,6 +168,49 @@ describe('buildUnsignedPaymentTx, native asset flow', () => {
       requirements: tokenRequirements('10'),
     })).rejects.toThrow(/holds ≥ 10 of/);
   });
+
+  it('rejects when the low-ADA token UTxO has no second UTxO available for padding', async () => {
+    // Only one UTxO, holds tokens but < 3 ADA → padding required, none exists.
+    mockedBridge.getUtxosAtAddress.mockResolvedValue([
+      tokenUtxo('20', '2500000', 'f'.repeat(64), 0),
+    ]);
+    await expect(buildUnsignedPaymentTx({
+      buyerBech32: BUYER_ADDR,
+      requirements: tokenRequirements('10'),
+    })).rejects.toThrow(/no second UTxO available to fund fees/);
+  });
+});
+
+describe('buildUnsignedPaymentTx, address-shape rejections', () => {
+  it('rejects script-cred-only addresses (no VKey hash)', async () => {
+    // Enterprise address built from a script credential, not a key hash.
+    const NET_ID = CSL.NetworkInfo.testnet_preprod().network_id();
+    const scriptHashHex = '11'.repeat(28);
+    const scriptCred = CSL.Credential.from_scripthash(
+      CSL.ScriptHash.from_bytes(Buffer.from(scriptHashHex, 'hex')),
+    );
+    const scriptAddrBech32 = CSL.EnterpriseAddress.new(NET_ID, scriptCred)
+      .to_address().to_bech32();
+
+    mockedBridge.getUtxosAtAddress.mockResolvedValue([lovelaceUtxo('10000000')]);
+    await expect(buildUnsignedPaymentTx({
+      buyerBech32: scriptAddrBech32,
+      requirements: lovelaceRequirements('2000000'),
+    })).rejects.toThrow(/VKey hash, not a script/);
+  });
+
+  it('rejects reward / stake addresses (neither Base nor Enterprise)', async () => {
+    const NET_ID = CSL.NetworkInfo.testnet_preprod().network_id();
+    const stakeAddr = CSL.RewardAddress.new(NET_ID, CSL.Credential.from_keyhash(
+      CSL.Ed25519KeyHash.from_bytes(Buffer.from('22'.repeat(28), 'hex')),
+    )).to_address().to_bech32();
+
+    mockedBridge.getUtxosAtAddress.mockResolvedValue([lovelaceUtxo('10000000')]);
+    await expect(buildUnsignedPaymentTx({
+      buyerBech32: stakeAddr,
+      requirements: lovelaceRequirements('2000000'),
+    })).rejects.toThrow(/Base \/ Enterprise/);
+  });
 });
 
 // silence unused-import lint

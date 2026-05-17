@@ -2,10 +2,10 @@
 
 [![Tests](https://github.com/ODATANO/x402/actions/workflows/test.yaml/badge.svg)](https://github.com/ODATANO/x402/actions/workflows/test.yaml)
 [![Coverage](https://codecov.io/gh/ODATANO/x402/branch/main/graph/badge.svg)](https://codecov.io/gh/ODATANO/x402)
-[![ODATANO](https://img.shields.io/github/package-json/dependency-version/ODATANO/x402/peer/@odatano/core?label=%40odatano%2Fcore&color=blue)](https://www.npmjs.com/package/@odatano/core)
+[![ODATANO](https://img.shields.io/github/package-json/dependency-version/ODATANO/x402/peer/@odatano/core?label=%40odatano%2Fcore&color=yellowgreen)](https://www.npmjs.com/package/@odatano/core)
 [![npm](https://img.shields.io/npm/v/@odatano/x402?color=blue&logo=npm)](https://www.npmjs.com/package/@odatano/x402)
 [![npm downloads](https://img.shields.io/npm/dt/@odatano/x402?logo=npm&label=downloads&color=blue)](https://www.npmjs.com/package/@odatano/x402)
-[![spec](https://img.shields.io/badge/Cardano--x402-v2-blue)](https://github.com/cardano-foundation/x402/blob/main/specs/x402-specification-v2.md)
+[![spec](https://img.shields.io/badge/Cardano--x402-v2-red)](https://github.com/cardano-foundation/x402/blob/main/specs/x402-specification-v2.md)
 
 x402 payment gating for SAP CAP applications, backed by Cardano.
 
@@ -97,4 +97,4 @@ npm test                   # 232 tests, ~13s
 
 ## License
 
-Apache-2.0.
+Apache-2.0 (see [LICENSE](LICENSE))

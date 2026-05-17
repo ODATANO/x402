@@ -1,3 +1,4 @@
+![PDATANOX402](datano-x402.png)
 # @odatano/x402
 
 [![Tests](https://github.com/ODATANO/x402/actions/workflows/test.yaml/badge.svg)](https://github.com/ODATANO/x402/actions/workflows/test.yaml)

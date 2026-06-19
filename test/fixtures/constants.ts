@@ -1,45 +1,49 @@
 /**
  * Test fixtures shared across the suite.
  *
- * Two preprod test addresses (buyer + seller) generated from
- * deterministic 32-byte seeds. Deterministic so that test failures
- * are reproducible regardless of CI environment.
+ * Two preprod test addresses (buyer + seller) derived from deterministic
+ * 32-byte seeds. Deterministic so test failures reproduce regardless of
+ * CI environment.
  *
- * One synthetic preprod-style native asset (policy `aa…aa`, name `BEEF`).
- * One real txHash hex for use as nonce-UTxO reference (any 64-char hex
- * is on-chain-shaped; nothing validates it as a real on-chain tx
+ * Keys/addresses are built with `@harmoniclabs/buildooor` (the same
+ * stack @odatano/core uses), so the suite carries no CSL dependency.
+ *
+ * One synthetic preprod-style native asset (policy `a0…a0`, name `BEEF1`).
+ * One synthetic txHash hex for use as a nonce-UTxO reference (any 64-char
+ * hex is on-chain-shaped; nothing validates it as a real on-chain tx
  * until the chain-touching tests, which mock that step).
  */
 
-import * as CSL from '@emurgo/cardano-serialization-lib-nodejs';
+import {
+  Address,
+  Credential,
+  blake2b_224,
+  deriveEd25519PublicKey_sync,
+} from '@harmoniclabs/buildooor';
 
 export const NETWORK_PREPROD = 'cardano:preprod' as const;
 export const NETWORK_MAINNET = 'cardano:mainnet' as const;
 
 // ─── Deterministic test keys + addresses ─────────────────────────────
-function privFromSeed(seedHex: string): CSL.PrivateKey {
-  // Ed25519 extended key from a 32-byte seed. Use raw normal_bytes path ,
-  // deterministic, no BIP32 dance.
-  return CSL.PrivateKey.from_normal_bytes(Buffer.from(seedHex, 'hex'));
+// A raw 32-byte ed25519 key; `signEd25519_sync` derives the public key
+// from it, so this doubles as both "private key" and seed.
+function keyFromSeed(seedHex: string): Uint8Array {
+  return Uint8Array.from(Buffer.from(seedHex, 'hex'));
 }
 
 const BUYER_SEED  = 'aa'.repeat(32);
 const SELLER_SEED = 'bb'.repeat(32);
 
-export const BUYER_PRIV   = privFromSeed(BUYER_SEED);
-export const SELLER_PRIV  = privFromSeed(SELLER_SEED);
-export const BUYER_PUB    = BUYER_PRIV.to_public();
-export const SELLER_PUB   = SELLER_PRIV.to_public();
-export const BUYER_VKH    = BUYER_PUB.hash();
-export const SELLER_VKH   = SELLER_PUB.hash();
+export const BUYER_PRIV  = keyFromSeed(BUYER_SEED);
+export const SELLER_PRIV = keyFromSeed(SELLER_SEED);
+export const BUYER_PUB   = deriveEd25519PublicKey_sync(BUYER_PRIV);
+export const SELLER_PUB  = deriveEd25519PublicKey_sync(SELLER_PRIV);
+export const BUYER_VKH   = Buffer.from(blake2b_224(BUYER_PUB)).toString('hex');
+export const SELLER_VKH  = Buffer.from(blake2b_224(SELLER_PUB)).toString('hex');
 
-// preprod = network id 0
-const NET_ID = CSL.NetworkInfo.testnet_preprod().network_id();
-
-function enterpriseBech32(keyHash: CSL.Ed25519KeyHash): string {
-  return CSL.EnterpriseAddress.new(NET_ID, CSL.Credential.from_keyhash(keyHash))
-    .to_address()
-    .to_bech32();
+// preprod = testnet network id. Enterprise (no stake cred) key-hash address.
+function enterpriseBech32(vkhHex: string): string {
+  return Address.testnet(Credential.keyHash(vkhHex)).toString();
 }
 
 export const BUYER_ADDR  = enterpriseBech32(BUYER_VKH);

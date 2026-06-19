@@ -25,6 +25,7 @@ import {
 } from '../fixtures/constants';
 import { buildBody, signTx } from '../fixtures/build-tx';
 import { buildEnvelope } from '../fixtures/envelope';
+import { realParseTransaction } from '../fixtures/core-parse-mock';
 
 const mockedBridge = jest.mocked(bridge);
 
@@ -51,6 +52,11 @@ const requirementsBody = () => buildPaymentRequirements({
 
 beforeEach(() => {
   jest.resetAllMocks();
+  // decode() runs through the mocked bridge, so wire its parseTransaction
+  // to the real (Buildooor) parser, resetAllMocks wiped the factory impl.
+  mockedBridge.parseTransaction.mockImplementation(
+    realParseTransaction as typeof bridge.parseTransaction,
+  );
   // Sensible defaults; individual tests override.
   mockedBridge.getCurrentSlot.mockResolvedValue(CURRENT_SLOT);
   mockedBridge.isUtxoUnspent.mockResolvedValue(true);

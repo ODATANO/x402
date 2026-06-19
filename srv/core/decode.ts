@@ -17,7 +17,7 @@
  * `PaymentRequirementEntry` (the 6 mandatory checks).
  */
 
-import * as CSL from '@emurgo/cardano-serialization-lib-nodejs';
+import { parseTransaction, type ParsedTx, type ParsedTxOutput } from '../bridge';
 import { X402Error, Codes, type X402Code } from './errors';
 import type {
   DecodedPayment,
@@ -43,89 +43,49 @@ function decodeBase64ToBuffer(s: string, errCode: X402Code): Buffer {
   return buf;
 }
 
-function extractOutputs(txBody: CSL.TransactionBody): DecodedOutput[] {
-  const out = txBody.outputs();
-  const result: DecodedOutput[] = [];
-  for (let i = 0; i < out.len(); i++) {
-    const o = out.get(i);
-    const addr = o.address().to_bech32();
-    const value = o.amount();
-    const lovelace = value.coin().to_str();
-
-    const assets: DecodedAsset[] = [];
-    const ma = value.multiasset();
-    if (ma) {
-      const policies = ma.keys();
-      for (let p = 0; p < policies.len(); p++) {
-        const policy = policies.get(p);
-        const policyHex = Buffer.from(policy.to_bytes()).toString('hex').toLowerCase();
-        const assetMap = ma.get(policy);
-        if (!assetMap) continue;
-        const names = assetMap.keys();
-        for (let n = 0; n < names.len(); n++) {
-          const name = names.get(n);
-          const nameHex = Buffer.from(name.name()).toString('hex').toLowerCase();
-          const qty = assetMap.get(name);
-          if (!qty) continue;
-          assets.push({
-            unit:         (policyHex + nameHex),
-            policyId:     policyHex,
-            assetNameHex: nameHex,
-            quantity:     qty.to_str(),
-          });
-        }
-      }
-    }
-    result.push({ outputIndex: i, address: addr, lovelace, assets });
-  }
-  return result;
+function extractOutputs(outputs: ParsedTxOutput[]): DecodedOutput[] {
+  return outputs.map((o, i) => {
+    const assets: DecodedAsset[] = o.assets.map(a => {
+      // core gives `unit` = policyId(56 hex) + assetNameHex; split it back
+      // into the (policyId, assetNameHex) pair x402's validate.ts expects.
+      const unit = a.unit.toLowerCase();
+      return {
+        unit,
+        policyId:     unit.slice(0, 56),
+        assetNameHex: unit.slice(56),
+        quantity:     a.quantity,
+      };
+    });
+    return { outputIndex: i, address: o.address, lovelace: o.lovelace, assets };
+  });
 }
 
-function extractInputs(txBody: CSL.TransactionBody): DecodedInput[] {
-  const ins = txBody.inputs();
-  const result: DecodedInput[] = [];
-  for (let i = 0; i < ins.len(); i++) {
-    const inp = ins.get(i);
-    result.push({
-      txHash:      Buffer.from(inp.transaction_id().to_bytes()).toString('hex').toLowerCase(),
-      outputIndex: inp.index(),
-    });
-  }
-  return result;
+function extractInputs(inputs: ParsedTx['inputs']): DecodedInput[] {
+  return inputs.map(inp => ({
+    txHash:      inp.txHash.toLowerCase(),
+    outputIndex: inp.outputIndex,
+  }));
 }
 
 /**
- * Pull validity range bounds. CSL exposes `ttl()` (upper) since Shelley
- * and `validity_start_interval_bignum()` (lower) since Allegra. Both can
- * be absent, in which case we return null and the TTL check is skipped
- * (per v2 spec: only validate TTL if buyer set one).
+ * Convert core's decimal-string slot bounds to numbers. Both bounds can
+ * be null, in which case the downstream TTL check is skipped (per v2
+ * spec: only validate TTL if the buyer set one). Slots fit comfortably
+ * in a JS number (current preprod ~85M, max safe int 9e15).
  */
-function extractValidityRange(txBody: CSL.TransactionBody): {
+function extractValidityRange(parsed: ParsedTx): {
   ttlSlot: number | null;
   validityStartSlot: number | null;
 } {
-  let ttlSlot: number | null = null;
-  let validityStartSlot: number | null = null;
-
-  try {
-    const ttl = txBody.ttl_bignum();
-    if (ttl) {
-      // BigNum → string → number; slots fit comfortably in JS number
-      // (current preprod ~85M, max safe int 9e15).
-      ttlSlot = Number(ttl.to_str());
-      if (!Number.isFinite(ttlSlot)) ttlSlot = null;
-    }
-  } catch { ttlSlot = null; }
-
-  try {
-    const start = txBody.validity_start_interval_bignum();
-    if (start) {
-      validityStartSlot = Number(start.to_str());
-      if (!Number.isFinite(validityStartSlot)) validityStartSlot = null;
-    }
-  } catch { validityStartSlot = null; }
-
-  return { ttlSlot, validityStartSlot };
+  const toSlot = (s: string | null): number | null => {
+    if (s == null) return null;
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  };
+  return {
+    ttlSlot:           toSlot(parsed.validityEnd),
+    validityStartSlot: toSlot(parsed.validityStart),
+  };
 }
 
 interface RawEnvelope {
@@ -193,27 +153,19 @@ export function decode(paymentHeader: string | undefined | null): DecodedPayment
     throw new X402Error(Codes.MISSING_FIELD, 'payload.nonce is required (v2 UTxO-ref)');
   }
 
-  // 3. Tx CBOR → CSL Transaction (parses both `transaction` and `fixed`
-  //    representation; we need both, Transaction for body access,
-  //    FixedTransaction for byte-stable hash).
+  // 3. Tx CBOR → structured fields via @odatano/core's pure Buildooor
+  //    parser. `parseTransaction` throws X402Error(INVALID_CBOR) on
+  //    malformed input, and its `txHash` (= body.hash) is byte-preserving,
+  //    the property the old CSL `FixedTransaction` path provided.
   const txBuf = decodeBase64ToBuffer(payload.transaction, Codes.INVALID_CBOR);
-  let tx: CSL.Transaction;
-  try { tx = CSL.Transaction.from_bytes(txBuf); }
-  catch { throw new X402Error(Codes.INVALID_CBOR, 'transaction CBOR did not decode'); }
+  const txCborHex = txBuf.toString('hex');
+  const parsed = parseTransaction(txCborHex);
 
   // 4. Diagnostics
-  const txBody = tx.body();
-  const wits = tx.witness_set();
-  const vkeys = wits.vkeys();
-  const vkeyWitnessCount = vkeys ? vkeys.len() : 0;
+  const txHash = parsed.txHash.toLowerCase();
+  const vkeyWitnessCount = parsed.witnesses.vkeyCount;
 
-  const txHashBytes = CSL.FixedTransaction
-    .from_bytes(txBuf)
-    .transaction_hash()
-    .to_bytes();
-  const txHash = Buffer.from(txHashBytes).toString('hex').toLowerCase();
-
-  const validity = extractValidityRange(txBody);
+  const validity = extractValidityRange(parsed);
   const nonce = parseNonceRef(payload.nonce);
 
   const envelope: PaymentEnvelope = {
@@ -225,10 +177,10 @@ export function decode(paymentHeader: string | undefined | null): DecodedPayment
 
   return {
     envelope,
-    txCborHex:         Buffer.from(txBuf).toString('hex'),
+    txCborHex,
     txHash,
-    outputs:           extractOutputs(txBody),
-    inputs:            extractInputs(txBody),
+    outputs:           extractOutputs(parsed.outputs),
+    inputs:            extractInputs(parsed.inputs),
     vkeyWitnessCount,
     ttlSlot:           validity.ttlSlot,
     validityStartSlot: validity.validityStartSlot,

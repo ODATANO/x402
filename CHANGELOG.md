@@ -4,6 +4,19 @@ All notable changes to `@odatano/x402` are documented here. The format follows [
 
 **Pre-1.0 caveat:** minor versions may include breaking changes until `1.0.0`.
 
+## [0.4.0] - 2026-06-19
+
+### Changed (breaking)
+- **Dropped the direct `@emurgo/cardano-serialization-lib-nodejs` (CSL) dependency.** x402 no longer carries a CBOR/transaction library of its own; all tx parsing and building now go through `@odatano/core`'s Buildooor stack (CSL-free since core `1.8.0`). **The `@odatano/core` peer requirement is now `>=1.9.1`** (was `>=1.7.8`). Upgrade `@odatano/core` in the same step.
+- **`buildUnsignedPaymentTx` now delegates to core's tx-builder.** UTxO selection, change, min-ADA and fee are handled by core (Buildooor `keepRelevant`) instead of x402's own CSL coin-selection. Consequences: the v2 `nonceRef` is now the built tx's first input (was x402's largest-UTxO pick); the validity-range upper bound is derived from a POSIX deadline and read back from the built tx, so `ttlSlot` reflects what the builder set (and may be `null` if unset) rather than a value x402 computed. The result shape (`unsignedTxCborHex`, `txHashHex`, `requiredSignerHex`, `nonceRef`, `inputs`, `ttlSlot`) and the `BuildUnsignedTxArgs` (`buyerBech32`, `requirements`, `ttlSlotsFromNow`) are unchanged. This helper is browser-buyer convenience only; it is not on the facilitator/validation path.
+
+### Added
+- `bech32` runtime dependency, for CSL-free Shelley address introspection (`srv/helpers/address.ts`) used to derive `requiredSignerHex` and validate Base/Enterprise key-cred addresses.
+
+### Internal
+- `srv/core/decode.ts` parses via core's pure `parseTransaction`; `srv/bridge.ts` gained typed `parseTransaction` and `buildUnsignedTransfer` wrappers (single coupling point preserved).
+- Test fixtures (`test/fixtures/{constants,build-tx}.ts`) rebuilt on `@harmoniclabs/buildooor` (dev-only); shared `core-parse-mock` stubs the core barrel down to its pure parser so decode-exercising suites don't load uncompiled `@cds-models` sources. Suite: 317 tests across 25 suites, all green.
+
 ## [0.3.1] - 2026-05-15
 
 ### Fixed

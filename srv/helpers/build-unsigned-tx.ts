@@ -1,42 +1,39 @@
 /**
  * Server-side unsigned payment-tx builder for browser-buyer flows.
  *
- * The browser knows the buyer's bech32 (via CIP-30) but not the
- * signing keys. Replicating CSL coin-selection + protocol-params
- * fetch in the browser would mean shipping ~2 MB of WASM. So we
- * build the unsigned tx server-side, return the CBOR for the
- * wallet to sign, and let the browser submit the signed CBOR as
- * `payload.transaction` in the PAYMENT-SIGNATURE envelope.
+ * The browser knows the buyer's bech32 (via CIP-30) but not the signing
+ * keys, and shipping coin-selection + protocol-params logic to the
+ * browser would mean megabytes of WASM. So we build the unsigned tx
+ * server-side, return the CBOR for the wallet to sign, and let the
+ * browser submit the signed CBOR as `payload.transaction` in the
+ * PAYMENT-SIGNATURE envelope.
  *
- * Diff vs v1 of CHAINFEED's same-named helper:
- *   - Asset-agnostic, parses requirements.asset as a v2 string
- *     (`'lovelace'` or `'<policy>.<nameHex>'`).
- *   - Returns `nonceRef` alongside the unsigned CBOR, the server
- *     picks one of the buyer's chosen inputs as the v2 nonce UTxO,
- *     so the browser doesn't have to reason about it.
+ * The build itself (UTxO fetch, coin selection, change, min-ADA, fee) is
+ * delegated wholesale to `@odatano/core`'s Buildooor builder via
+ * `bridge.buildUnsignedTransfer`, x402 owns no tx-construction library.
+ * We add only the two x402-specific pieces core doesn't:
+ *   - the `requiredSignerHex` (buyer's payment-cred VKey hash), parsed
+ *     from the bech32 address (see `./address`);
+ *   - the v2 `nonceRef`, read back from the built tx's first input so it
+ *     is guaranteed to reference a UTxO the tx actually spends.
  *
- * **x402-spec deviation:** strict v2 has the buyer construct the
- * tx end-to-end. This helper is a "self-facilitator" pattern: the
- * server builds, the buyer signs, the server still validates the
- * signed tx against requirements before settling. Same security
- * model (the buyer's signature still authorises the spend), easier
- * browser ergonomics.
+ * **x402-spec deviation:** strict v2 has the buyer construct the tx
+ * end-to-end. This is the "self-facilitator" pattern: the server builds,
+ * the buyer signs, the server still validates the signed tx against
+ * requirements before settling. Same security model (the buyer's
+ * signature still authorises the spend), easier browser ergonomics.
  */
 
-import * as CSL from '@emurgo/cardano-serialization-lib-nodejs';
 import * as bridge from '../bridge';
 import type { PaymentRequirementEntry } from '../core/types';
 import { parseAsset } from '../core/asset';
+import { parsePaymentAddress } from './address';
 
-interface ProtoParams {
-  minFeeA:          number | string;
-  minFeeB:          number | string;
-  poolDeposit:      number | string;
-  keyDeposit:       number | string;
-  maxValSize:       number | string;
-  maxTxSize:        number | string;
-  coinsPerUtxoSize: number | string;
-}
+/** ADA (lovelace) attached to a native-asset output to satisfy min-ADA. */
+const TOKEN_OUTPUT_LOVELACE = 2_000_000n;
+
+/** Cardano networks run 1-second slots, so TTL slots ≈ TTL seconds. */
+const SLOT_MS = 1000;
 
 export interface BuildUnsignedTxArgs {
   /** Buyer's bech32 address (must be Base or Enterprise with VKey-hash payment cred). */
@@ -44,7 +41,7 @@ export interface BuildUnsignedTxArgs {
   /** A single accepts[] entry, call `flatRequirements(body)` to extract. */
   requirements: PaymentRequirementEntry;
   /**
-   * Optional TTL in slots from "now" (= current chain tip slot).
+   * Optional TTL in slots from "now" (= current chain tip).
    * Default 1800 (≈30 min on Cardano's 1s-slot networks).
    */
   ttlSlotsFromNow?: number;
@@ -57,12 +54,12 @@ export interface UnsignedTxResult {
   txHashHex:         string;
   /** Buyer's payment-cred VKey hash, wallet must sign for this. */
   requiredSignerHex: string;
-  /** v2 nonce reference `<txHash>#<index>`, picked from the buyer's chosen inputs. */
+  /** v2 nonce reference `<txHash>#<index>`, the tx's first spent input. */
   nonceRef:          string;
-  /** Echo of the inputs chosen so the buyer's UI can show "spends these UTxOs". */
+  /** Echo of the inputs the builder selected so the buyer's UI can show "spends these UTxOs". */
   inputs: Array<{ txHash: string; outputIndex: number; lovelace: string }>;
-  /** TTL slot used for the validity-range upper bound. */
-  ttlSlot:           number;
+  /** TTL slot used for the validity-range upper bound (as set by the builder). */
+  ttlSlot:           number | null;
 }
 
 export async function buildUnsignedPaymentTx(
@@ -70,175 +67,56 @@ export async function buildUnsignedPaymentTx(
 ): Promise<UnsignedTxResult> {
   const { buyerBech32, requirements } = args;
 
-  // 1. Decode buyer address; derive payment-cred VKey hash.
-  let buyerAddress: CSL.Address;
-  try { buyerAddress = CSL.Address.from_bech32(buyerBech32); }
-  catch { throw new Error(`buildUnsignedPaymentTx: invalid bech32 address: ${buyerBech32}`); }
+  // 1. Validate the buyer address shape and derive the required signer.
+  //    Throws for bad bech32 / script-cred / non-payment addresses.
+  const { paymentKeyHashHex } = parsePaymentAddress(buyerBech32);
 
-  const baseAddr       = CSL.BaseAddress.from_address(buyerAddress);
-  const enterpriseAddr = CSL.EnterpriseAddress.from_address(buyerAddress);
-  const paymentCred    = baseAddr?.payment_cred() ?? enterpriseAddr?.payment_cred();
-  if (!paymentCred) {
-    throw new Error('buildUnsignedPaymentTx: only Base / Enterprise addresses are supported');
-  }
-  const buyerVkeyHash = paymentCred.to_keyhash();
-  if (!buyerVkeyHash) {
-    throw new Error('buildUnsignedPaymentTx: payment credential must be a VKey hash, not a script');
-  }
-  const requiredSignerHex = Buffer.from(buyerVkeyHash.to_bytes()).toString('hex');
-
-  // 2. Fetch buyer UTxOs + protocol params + current slot in parallel.
-  const [utxos, params, currentSlot] = await Promise.all([
-    bridge.getUtxosAtAddress(buyerBech32),
-    bridge.getProtocolParameters() as Promise<ProtoParams>,
-    bridge.getCurrentSlot(),
-  ]);
-  if (utxos.length === 0) {
-    throw new Error(`buildUnsignedPaymentTx: no UTxOs at ${buyerBech32}`);
-  }
-
-  // 3. Pick the input(s) for coin-selection.
-  //    Strategy:
-  //      - If lovelace asset: pick largest-ADA UTxO; add second-largest as padding if first < 3 ADA.
-  //      - If native asset:   pick largest-ADA UTxO that ALSO holds enough of the asset;
-  //                           add padding the same way.
+  // 2. Translate the v2 requirement into a core transfer request.
   const parsedAsset = parseAsset(requirements.asset);
   const required = BigInt(requirements.amount);
+  const validityEndMs = Date.now() + (args.ttlSlotsFromNow ?? 1800) * SLOT_MS;
 
-  const sortedByAda = [...utxos].sort(
-    (a, b) => (BigInt(b.lovelace) - BigInt(a.lovelace) > 0n ? 1 : -1),
-  );
-
-  let inputs: typeof utxos;
-  if (parsedAsset.isLovelace) {
-    // ADA payment: largest UTxO must cover required + fees + min-ADA change.
-    // Heuristic: required + 2_000_000 (≈2 ADA fee+change headroom).
-    const headroom = required + 2_000_000n;
-    const ok = sortedByAda.find(u => BigInt(u.lovelace) >= headroom);
-    if (!ok) {
-      throw new Error(`buildUnsignedPaymentTx: no UTxO at ${buyerBech32} with ≥ ${headroom} lovelace`);
-    }
-    inputs = [ok];
-  } else {
-    const candidates = sortedByAda.filter(u =>
-      u.assets.some(a => a.unit === parsedAsset.unit && BigInt(a.quantity) >= required),
-    );
-    if (candidates.length === 0) {
-      throw new Error(
-        `buildUnsignedPaymentTx: no UTxO at ${buyerBech32} holds ≥ ${required} of ${parsedAsset.unit}`,
-      );
-    }
-    const tokenInput = candidates[0]!;
-    inputs = [tokenInput];
-    if (BigInt(tokenInput.lovelace) < 3_000_000n) {
-      const padding = sortedByAda.find(u => u !== tokenInput);
-      if (!padding) {
-        throw new Error('buildUnsignedPaymentTx: no second UTxO available to fund fees');
+  const req: bridge.CoreTransferReq = parsedAsset.isLovelace
+    ? {
+        senderAddress:    buyerBech32,
+        recipientAddress: requirements.payTo,
+        changeAddress:    buyerBech32,
+        lovelaceAmount:   required.toString(),
+        validityEndMs,
       }
-      inputs.push(padding);
-    }
+    : {
+        senderAddress:    buyerBech32,
+        recipientAddress: requirements.payTo,
+        changeAddress:    buyerBech32,
+        // Native-asset output rides a fixed min-ADA; change reconciles the rest.
+        lovelaceAmount:   TOKEN_OUTPUT_LOVELACE.toString(),
+        assets:           [{ unit: parsedAsset.unit, quantity: required.toString() }],
+        validityEndMs,
+      };
+
+  // 3. Delegate the build (UTxO fetch + coin selection + change + fee).
+  const result = await bridge.buildUnsignedTransfer(req);
+
+  // 4. Read the built tx back to recover the v2 nonce (first spent input,
+  //    guaranteed present) and the TTL slot the builder actually set.
+  const parsed = bridge.parseTransaction(result.unsignedTxCbor);
+  const nonceInput = parsed.inputs[0];
+  if (!nonceInput) {
+    throw new Error('buildUnsignedPaymentTx: builder produced a tx with no inputs');
   }
-
-  // 4. Configure CSL TransactionBuilder from live protocol params.
-  const builder = CSL.TransactionBuilder.new(
-    CSL.TransactionBuilderConfigBuilder.new()
-      .fee_algo(CSL.LinearFee.new(
-        CSL.BigNum.from_str(String(params.minFeeA)),
-        CSL.BigNum.from_str(String(params.minFeeB)),
-      ))
-      .pool_deposit(CSL.BigNum.from_str(String(params.poolDeposit)))
-      .key_deposit(CSL.BigNum.from_str(String(params.keyDeposit)))
-      .max_value_size(Number(params.maxValSize))
-      .max_tx_size(Number(params.maxTxSize))
-      .coins_per_utxo_byte(CSL.BigNum.from_str(String(params.coinsPerUtxoSize)))
-      .build(),
-  );
-
-  // 5. Wire inputs (preserve full multi-asset payload).
-  for (const u of inputs) {
-    const inMa = CSL.MultiAsset.new();
-    const byPolicy = new Map<string, Array<{ name: string; qty: string }>>();
-    for (const a of u.assets) {
-      const arr = byPolicy.get(a.policyId) ?? [];
-      arr.push({ name: a.assetNameHex, qty: a.quantity });
-      byPolicy.set(a.policyId, arr);
-    }
-    for (const [policyHex, items] of byPolicy) {
-      const policyHash = CSL.ScriptHash.from_bytes(Buffer.from(policyHex, 'hex'));
-      const assetMap = CSL.Assets.new();
-      for (const { name, qty } of items) {
-        assetMap.insert(
-          CSL.AssetName.new(Buffer.from(name, 'hex')),
-          CSL.BigNum.from_str(qty),
-        );
-      }
-      inMa.insert(policyHash, assetMap);
-    }
-    const inV = CSL.Value.new(CSL.BigNum.from_str(u.lovelace));
-    if (u.assets.length) inV.set_multiasset(inMa);
-    builder.add_key_input(
-      buyerVkeyHash,
-      CSL.TransactionInput.new(
-        CSL.TransactionHash.from_bytes(Buffer.from(u.txHash, 'hex')),
-        u.outputIndex,
-      ),
-      inV,
-    );
-  }
-
-  // 6. Output to payTo.
-  const payToAddr = CSL.Address.from_bech32(requirements.payTo);
-  let payOut: CSL.TransactionOutput;
-  if (parsedAsset.isLovelace) {
-    const v = CSL.Value.new(CSL.BigNum.from_str(required.toString()));
-    payOut = CSL.TransactionOutput.new(payToAddr, v);
-  } else {
-    const payOutMa  = CSL.MultiAsset.new();
-    const payAssets = CSL.Assets.new();
-    const policyHash = CSL.ScriptHash.from_bytes(Buffer.from(parsedAsset.policyId, 'hex'));
-    payAssets.insert(
-      CSL.AssetName.new(Buffer.from(parsedAsset.assetNameHex, 'hex')),
-      CSL.BigNum.from_str(required.toString()),
-    );
-    payOutMa.insert(policyHash, payAssets);
-    const payOutV = CSL.Value.new(CSL.BigNum.from_str('0'));
-    payOutV.set_multiasset(payOutMa);
-    const provisional = CSL.TransactionOutput.new(payToAddr, payOutV);
-    const minAda = CSL.min_ada_for_output(
-      provisional,
-      CSL.DataCost.new_coins_per_byte(CSL.BigNum.from_str(String(params.coinsPerUtxoSize))),
-    );
-    payOutV.set_coin(minAda);
-    payOut = CSL.TransactionOutput.new(payToAddr, payOutV);
-  }
-  builder.add_output(payOut);
-
-  // 7. TTL (slot of upper bound). Default 1800 slots ≈ 30 min.
-  const ttlSlot = currentSlot + (args.ttlSlotsFromNow ?? 1800);
-  builder.set_ttl_bignum(CSL.BigNum.from_str(String(ttlSlot)));
-
-  // 8. Change to buyer.
-  builder.add_change_if_needed(buyerAddress);
-
-  // 9. Build body, compute hash, return unsigned tx.
-  const txBody = builder.build();
-  const txHash = CSL.FixedTransaction.new_from_body_bytes(txBody.to_bytes()).transaction_hash();
-
-  const emptyWits = CSL.TransactionWitnessSet.new();
-  const unsigned  = CSL.Transaction.new(txBody, emptyWits);
-
-  // Pick the first input as the v2 nonce UTxO.
-  // It MUST appear in tx.inputs (which it does by construction) and be
-  // unspent (which it is, we just queried it from the buyer's UTxO set).
-  const nonceInput = inputs[0]!;
   const nonceRef = `${nonceInput.txHash}#${nonceInput.outputIndex}`;
+  const ttlSlot = parsed.validityEnd != null ? Number(parsed.validityEnd) : null;
 
   return {
-    unsignedTxCborHex: Buffer.from(unsigned.to_bytes()).toString('hex'),
-    txHashHex:         Buffer.from(txHash.to_bytes()).toString('hex').toLowerCase(),
-    requiredSignerHex,
+    unsignedTxCborHex: result.unsignedTxCbor,
+    txHashHex:         result.txBodyHash.toLowerCase(),
+    requiredSignerHex: paymentKeyHashHex,
     nonceRef,
-    inputs: inputs.map(i => ({ txHash: i.txHash, outputIndex: i.outputIndex, lovelace: i.lovelace })),
+    inputs: result.inputs.map(i => ({
+      txHash:      i.txHash,
+      outputIndex: i.index,
+      lovelace:    i.lovelace,
+    })),
     ttlSlot,
   };
 }

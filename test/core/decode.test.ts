@@ -1,3 +1,8 @@
+// Stub the @odatano/core barrel down to its pure parser so bridge.ts's
+// top-level require() doesn't drag in uncompiled @cds-models .ts. The real
+// bridge.ts + real Buildooor parser stay under test. See core-parse-mock.
+jest.mock('@odatano/core', () => require('../fixtures/core-parse-mock').coreParseMock());
+
 import { decode } from '../../srv/core/decode';
 import { X402Error, Codes } from '../../srv/core/errors';
 import {

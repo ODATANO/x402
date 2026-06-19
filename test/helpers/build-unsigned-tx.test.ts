@@ -1,15 +1,18 @@
 /**
  * Tests for the unsigned-payment-tx builder.
  *
- * We bridge-mock at the module level so the builder runs entirely in
- * memory, getUtxosAtAddress / getProtocolParameters / getCurrentSlot
- * are all data fed by the test. This covers happy-path lovelace and
- * native-asset flows, plus the documented failure modes (no UTxOs,
- * insufficient holdings, script-payment-cred refusal, ADA padding).
+ * Since v0.4 the actual build (UTxO fetch, coin selection, change,
+ * min-ADA, fee) is delegated to @odatano/core's Buildooor builder via
+ * `bridge.buildUnsignedTransfer`. This helper now owns only the x402
+ * glue, so the tests assert that glue:
+ *   - the v2 requirement is translated into the right core request
+ *     (sender/recipient/change, lovelace vs native-asset, validity);
+ *   - the buyer's `requiredSignerHex` is derived from the bech32 address
+ *     (real `parsePaymentAddress`, no mock) and bad/unsupported addresses
+ *     are rejected;
+ *   - the v2 `nonceRef` and `ttlSlot` are read back from the built tx.
  *
- * Building the actual signed CBOR would require buyer private keys ,
- * orthogonal to what THIS module does. We assert the unsigned CBOR
- * is decodable and the metadata fields are populated correctly.
+ * Coin-selection behaviour itself is core's concern and covered there.
  */
 
 import { bridgeFactory } from '../fixtures/mock-bridge';
@@ -19,43 +22,50 @@ import * as bridge from '../../srv/bridge';
 import { buildUnsignedPaymentTx } from '../../srv/helpers/build-unsigned-tx';
 import { buildEntry } from '../../srv/core/requirements';
 import {
-  BUYER_PRIV, BUYER_ADDR, SELLER_ADDR,
-  NONCE_TX_HASH, NETWORK_PREPROD,
-  TEST_POLICY_ID, TEST_ASSET_NAME, TEST_ASSET_STRING, TEST_ASSET_UNIT,
+  BUYER_ADDR, BUYER_VKH, SELLER_ADDR,
+  NETWORK_PREPROD,
+  TEST_ASSET_STRING, TEST_ASSET_UNIT,
   CURRENT_SLOT,
 } from '../fixtures/constants';
-import * as CSL from '@emurgo/cardano-serialization-lib-nodejs';
+import { bech32 } from 'bech32';
 
 const mockedBridge = jest.mocked(bridge);
 
-const PROTOCOL_PARAMS = {
-  minFeeA: 44,
-  minFeeB: 155381,
-  poolDeposit: '500000000',
-  keyDeposit: '2000000',
-  maxValSize: 5000,
-  maxTxSize: 16384,
-  coinsPerUtxoSize: 4310,
-};
-
-beforeEach(() => {
-  jest.resetAllMocks();
-  mockedBridge.getProtocolParameters.mockResolvedValue(PROTOCOL_PARAMS as unknown);
-  mockedBridge.getCurrentSlot.mockResolvedValue(CURRENT_SLOT);
-});
-
-function lovelaceUtxo(qty: string, txHash = NONCE_TX_HASH, outputIndex = 0) {
-  return {
-    txHash, outputIndex, address: BUYER_ADDR,
-    lovelace: qty, assets: [],
-  };
+/** Build a bech32 address from a raw Shelley header byte + 28-byte cred. */
+function craftAddr(prefix: string, headerByte: number, credHex: string): string {
+  const bytes = Uint8Array.from([headerByte, ...Buffer.from(credHex, 'hex')]);
+  return bech32.encode(prefix, bech32.toWords(bytes), 1023);
 }
-function tokenUtxo(qty: string, lovelace = '5000000', txHash = NONCE_TX_HASH, outputIndex = 0) {
+
+/** Minimal ParsedTx the builder reads back (inputs[0] → nonce, validityEnd → ttl). */
+function parsed(opts: {
+  inputs: Array<{ txHash: string; outputIndex: number }>;
+  validityEnd: string | null;
+}) {
   return {
-    txHash, outputIndex, address: BUYER_ADDR, lovelace,
-    assets: [{
-      unit: TEST_ASSET_UNIT, policyId: TEST_POLICY_ID, assetNameHex: TEST_ASSET_NAME, quantity: qty,
-    }],
+    txHash: 'ab'.repeat(32),
+    network: 'testnet',
+    inputs: opts.inputs,
+    outputs: [],
+    validityStart: null,
+    validityEnd: opts.validityEnd,
+    fee: '180000',
+    mint: [],
+    requiredSigners: [],
+    scriptDataHash: null,
+    witnesses: { vkeyCount: 0, nativeScripts: 0, plutusScripts: 0, plutusData: 0, redeemers: 0 },
+  } as unknown as ReturnType<typeof bridge.parseTransaction>;
+}
+
+function coreResult(opts: {
+  inputs: Array<{ txHash: string; index: number; lovelace: string }>;
+}) {
+  return {
+    unsignedTxCbor: 'aa'.repeat(80),
+    txBodyHash:     'FF'.repeat(32), // upper-case → builder must lower-case it
+    inputs:         opts.inputs,
+    outputs:        [{ address: SELLER_ADDR, lovelace: '2000000' }],
+    feeLovelace:    '180000',
   };
 }
 
@@ -73,145 +83,134 @@ function tokenRequirements(amount = '10') {
   });
 }
 
-describe('buildUnsignedPaymentTx, input validation', () => {
-  it('rejects bad bech32 address', async () => {
-    mockedBridge.getUtxosAtAddress.mockResolvedValue([]);
+beforeEach(() => {
+  jest.resetAllMocks();
+});
+
+describe('buildUnsignedPaymentTx, address validation', () => {
+  it('rejects bad bech32 address before any build call', async () => {
     await expect(buildUnsignedPaymentTx({
       buyerBech32: 'not-bech32',
       requirements: lovelaceRequirements(),
     })).rejects.toThrow(/invalid bech32/);
+    expect(mockedBridge.buildUnsignedTransfer).not.toHaveBeenCalled();
   });
 
-  it('rejects when buyer has no UTxOs', async () => {
-    mockedBridge.getUtxosAtAddress.mockResolvedValue([]);
-    await expect(buildUnsignedPaymentTx({
-      buyerBech32: BUYER_ADDR,
-      requirements: lovelaceRequirements(),
-    })).rejects.toThrow(/no UTxOs/);
-  });
-});
-
-describe('buildUnsignedPaymentTx, lovelace flow', () => {
-  it('picks the largest UTxO covering required + 2 ADA headroom', async () => {
-    mockedBridge.getUtxosAtAddress.mockResolvedValue([
-      lovelaceUtxo('500000'),                                      // too small
-      lovelaceUtxo('10000000', 'a'.repeat(64), 1),                 // chosen
-      lovelaceUtxo('1500000',  'b'.repeat(64), 2),                 // also too small
-    ]);
-    const r = await buildUnsignedPaymentTx({
-      buyerBech32: BUYER_ADDR,
-      requirements: lovelaceRequirements('2000000'),
-    });
-    expect(r.inputs).toHaveLength(1);
-    expect(r.inputs[0]!.txHash).toBe('a'.repeat(64));
-    expect(r.nonceRef).toBe(`${'a'.repeat(64)}#1`);
-    expect(r.ttlSlot).toBe(CURRENT_SLOT + 1800);
-    expect(r.requiredSignerHex).toMatch(/^[0-9a-f]{56}$/);
-
-    // The unsigned CBOR should decode back to a transaction with no witnesses.
-    const tx = CSL.Transaction.from_hex(r.unsignedTxCborHex);
-    const wits = tx.witness_set().vkeys();
-    expect(wits?.len() ?? 0).toBe(0);
-  });
-
-  it('rejects when no UTxO covers required + headroom', async () => {
-    mockedBridge.getUtxosAtAddress.mockResolvedValue([lovelaceUtxo('500000')]);
-    await expect(buildUnsignedPaymentTx({
-      buyerBech32: BUYER_ADDR,
-      requirements: lovelaceRequirements('1000000000'),
-    })).rejects.toThrow(/lovelace/);
-  });
-
-  it('honours custom ttlSlotsFromNow', async () => {
-    mockedBridge.getUtxosAtAddress.mockResolvedValue([lovelaceUtxo('10000000')]);
-    const r = await buildUnsignedPaymentTx({
-      buyerBech32: BUYER_ADDR,
-      requirements: lovelaceRequirements(),
-      ttlSlotsFromNow: 60,
-    });
-    expect(r.ttlSlot).toBe(CURRENT_SLOT + 60);
-  });
-});
-
-describe('buildUnsignedPaymentTx, native asset flow', () => {
-  it('picks largest-ADA UTxO that holds enough of the token', async () => {
-    mockedBridge.getUtxosAtAddress.mockResolvedValue([
-      tokenUtxo('5'),                                                   // too few tokens
-      tokenUtxo('20', '8000000', 'c'.repeat(64), 3),                    // chosen
-    ]);
-    const r = await buildUnsignedPaymentTx({
-      buyerBech32: BUYER_ADDR,
-      requirements: tokenRequirements('10'),
-    });
-    expect(r.inputs).toHaveLength(1);
-    expect(r.inputs[0]!.txHash).toBe('c'.repeat(64));
-  });
-
-  it('adds a second UTxO for fee padding when the token UTxO has < 3 ADA', async () => {
-    mockedBridge.getUtxosAtAddress.mockResolvedValue([
-      tokenUtxo('20', '2500000', 'd'.repeat(64), 0),                    // token UTxO < 3 ADA
-      lovelaceUtxo('5000000', 'e'.repeat(64), 1),                       // padding
-    ]);
-    const r = await buildUnsignedPaymentTx({
-      buyerBech32: BUYER_ADDR,
-      requirements: tokenRequirements('10'),
-    });
-    expect(r.inputs).toHaveLength(2);
-    expect(r.inputs.map(i => i.txHash)).toContain('d'.repeat(64));
-    expect(r.inputs.map(i => i.txHash)).toContain('e'.repeat(64));
-  });
-
-  it('rejects when no UTxO holds enough of the token', async () => {
-    mockedBridge.getUtxosAtAddress.mockResolvedValue([tokenUtxo('3', '5000000')]);
-    await expect(buildUnsignedPaymentTx({
-      buyerBech32: BUYER_ADDR,
-      requirements: tokenRequirements('10'),
-    })).rejects.toThrow(/holds ≥ 10 of/);
-  });
-
-  it('rejects when the low-ADA token UTxO has no second UTxO available for padding', async () => {
-    // Only one UTxO, holds tokens but < 3 ADA → padding required, none exists.
-    mockedBridge.getUtxosAtAddress.mockResolvedValue([
-      tokenUtxo('20', '2500000', 'f'.repeat(64), 0),
-    ]);
-    await expect(buildUnsignedPaymentTx({
-      buyerBech32: BUYER_ADDR,
-      requirements: tokenRequirements('10'),
-    })).rejects.toThrow(/no second UTxO available to fund fees/);
-  });
-});
-
-describe('buildUnsignedPaymentTx, address-shape rejections', () => {
   it('rejects script-cred-only addresses (no VKey hash)', async () => {
-    // Enterprise address built from a script credential, not a key hash.
-    const NET_ID = CSL.NetworkInfo.testnet_preprod().network_id();
-    const scriptHashHex = '11'.repeat(28);
-    const scriptCred = CSL.Credential.from_scripthash(
-      CSL.ScriptHash.from_bytes(Buffer.from(scriptHashHex, 'hex')),
-    );
-    const scriptAddrBech32 = CSL.EnterpriseAddress.new(NET_ID, scriptCred)
-      .to_address().to_bech32();
-
-    mockedBridge.getUtxosAtAddress.mockResolvedValue([lovelaceUtxo('10000000')]);
+    // Enterprise (type 7), testnet (net 0) → header 0x70, script payment cred.
+    const scriptAddr = craftAddr('addr_test', 0x70, '11'.repeat(28));
     await expect(buildUnsignedPaymentTx({
-      buyerBech32: scriptAddrBech32,
-      requirements: lovelaceRequirements('2000000'),
+      buyerBech32: scriptAddr,
+      requirements: lovelaceRequirements(),
     })).rejects.toThrow(/VKey hash, not a script/);
   });
 
   it('rejects reward / stake addresses (neither Base nor Enterprise)', async () => {
-    const NET_ID = CSL.NetworkInfo.testnet_preprod().network_id();
-    const stakeAddr = CSL.RewardAddress.new(NET_ID, CSL.Credential.from_keyhash(
-      CSL.Ed25519KeyHash.from_bytes(Buffer.from('22'.repeat(28), 'hex')),
-    )).to_address().to_bech32();
-
-    mockedBridge.getUtxosAtAddress.mockResolvedValue([lovelaceUtxo('10000000')]);
+    // Reward (type 14), testnet (net 0) → header 0xe0.
+    const stakeAddr = craftAddr('stake_test', 0xe0, '22'.repeat(28));
     await expect(buildUnsignedPaymentTx({
       buyerBech32: stakeAddr,
-      requirements: lovelaceRequirements('2000000'),
+      requirements: lovelaceRequirements(),
     })).rejects.toThrow(/Base \/ Enterprise/);
   });
 });
 
-// silence unused-import lint
-void BUYER_PRIV;
+describe('buildUnsignedPaymentTx, lovelace flow', () => {
+  it('translates an ADA requirement into a plain-ADA core request', async () => {
+    mockedBridge.buildUnsignedTransfer.mockResolvedValue(
+      coreResult({ inputs: [{ txHash: 'a'.repeat(64), index: 1, lovelace: '10000000' }] }),
+    );
+    mockedBridge.parseTransaction.mockReturnValue(
+      parsed({ inputs: [{ txHash: 'a'.repeat(64), outputIndex: 1 }], validityEnd: String(CURRENT_SLOT + 1800) }),
+    );
+
+    const r = await buildUnsignedPaymentTx({
+      buyerBech32: BUYER_ADDR,
+      requirements: lovelaceRequirements('2000000'),
+    });
+
+    const req = mockedBridge.buildUnsignedTransfer.mock.calls[0]![0];
+    expect(req.senderAddress).toBe(BUYER_ADDR);
+    expect(req.recipientAddress).toBe(SELLER_ADDR);
+    expect(req.changeAddress).toBe(BUYER_ADDR);
+    expect(req.lovelaceAmount).toBe('2000000');
+    expect(req.assets).toBeUndefined();
+    expect(typeof req.validityEndMs).toBe('number');
+
+    expect(r.unsignedTxCborHex).toBe('aa'.repeat(80));
+    expect(r.txHashHex).toBe('ff'.repeat(32));               // lower-cased
+    expect(r.requiredSignerHex).toBe(BUYER_VKH);
+    expect(r.requiredSignerHex).toMatch(/^[0-9a-f]{56}$/);
+    expect(r.nonceRef).toBe(`${'a'.repeat(64)}#1`);          // from parsed inputs[0]
+    expect(r.ttlSlot).toBe(CURRENT_SLOT + 1800);             // from parsed validityEnd
+    expect(r.inputs).toEqual([{ txHash: 'a'.repeat(64), outputIndex: 1, lovelace: '10000000' }]);
+  });
+
+  it('sets validityEndMs from ttlSlotsFromNow (1s slots)', async () => {
+    mockedBridge.buildUnsignedTransfer.mockResolvedValue(
+      coreResult({ inputs: [{ txHash: 'a'.repeat(64), index: 0, lovelace: '10000000' }] }),
+    );
+    mockedBridge.parseTransaction.mockReturnValue(
+      parsed({ inputs: [{ txHash: 'a'.repeat(64), outputIndex: 0 }], validityEnd: String(CURRENT_SLOT + 60) }),
+    );
+
+    const before = Date.now();
+    await buildUnsignedPaymentTx({
+      buyerBech32: BUYER_ADDR,
+      requirements: lovelaceRequirements(),
+      ttlSlotsFromNow: 60,
+    });
+    const after = Date.now();
+
+    const req = mockedBridge.buildUnsignedTransfer.mock.calls[0]![0];
+    // 60 slots ≈ 60_000 ms ahead of "now".
+    expect(req.validityEndMs).toBeGreaterThanOrEqual(before + 60_000);
+    expect(req.validityEndMs).toBeLessThanOrEqual(after + 60_000);
+  });
+});
+
+describe('buildUnsignedPaymentTx, native asset flow', () => {
+  it('translates a token requirement into a multi-asset core request with riding min-ADA', async () => {
+    mockedBridge.buildUnsignedTransfer.mockResolvedValue(
+      coreResult({ inputs: [{ txHash: 'c'.repeat(64), index: 3, lovelace: '8000000' }] }),
+    );
+    mockedBridge.parseTransaction.mockReturnValue(
+      parsed({ inputs: [{ txHash: 'c'.repeat(64), outputIndex: 3 }], validityEnd: String(CURRENT_SLOT + 1800) }),
+    );
+
+    const r = await buildUnsignedPaymentTx({
+      buyerBech32: BUYER_ADDR,
+      requirements: tokenRequirements('10'),
+    });
+
+    const req = mockedBridge.buildUnsignedTransfer.mock.calls[0]![0];
+    expect(req.lovelaceAmount).toBe('2000000');              // TOKEN_OUTPUT_LOVELACE
+    expect(req.assets).toEqual([{ unit: TEST_ASSET_UNIT, quantity: '10' }]);
+    expect(r.nonceRef).toBe(`${'c'.repeat(64)}#3`);
+  });
+});
+
+describe('buildUnsignedPaymentTx, builder edge cases', () => {
+  it('throws if the builder returns a tx with no inputs', async () => {
+    mockedBridge.buildUnsignedTransfer.mockResolvedValue(coreResult({ inputs: [] }));
+    mockedBridge.parseTransaction.mockReturnValue(parsed({ inputs: [], validityEnd: null }));
+    await expect(buildUnsignedPaymentTx({
+      buyerBech32: BUYER_ADDR,
+      requirements: lovelaceRequirements(),
+    })).rejects.toThrow(/no inputs/);
+  });
+
+  it('returns ttlSlot = null when the built tx carries no TTL', async () => {
+    mockedBridge.buildUnsignedTransfer.mockResolvedValue(
+      coreResult({ inputs: [{ txHash: 'a'.repeat(64), index: 0, lovelace: '10000000' }] }),
+    );
+    mockedBridge.parseTransaction.mockReturnValue(
+      parsed({ inputs: [{ txHash: 'a'.repeat(64), outputIndex: 0 }], validityEnd: null }),
+    );
+    const r = await buildUnsignedPaymentTx({
+      buyerBech32: BUYER_ADDR,
+      requirements: lovelaceRequirements(),
+    });
+    expect(r.ttlSlot).toBeNull();
+  });
+});

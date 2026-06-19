@@ -43,10 +43,21 @@ interface CardanoClient {
   isUtxoUnspent(txHash: string, outputIndex: number): Promise<boolean>;
 }
 
+/**
+ * Core's Buildooor-backed transfer builder. We only use the two
+ * non-script entry points; both do their own UTxO fetch + coin
+ * selection + change/min-ADA from `senderAddress`.
+ */
+interface CardanoTxBuilder {
+  buildSimpleAdaTransaction(req: CoreTransferReq, params: unknown): Promise<CoreTxBuildResult>;
+  buildMultiAssetTransaction(req: CoreTransferReq, params: unknown): Promise<CoreTxBuildResult>;
+}
+
 interface OdatanoModule {
   initialize(): Promise<unknown>;
   shutdown(): Promise<unknown>;
   getCardanoClient(): CardanoClient;
+  getCardanoTxBuilder(): CardanoTxBuilder;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -193,10 +204,118 @@ export async function isUtxoUnspent(
   return od.getCardanoClient().isUtxoUnspent(txHash, outputIndex);
 }
 
-// ─── Re-export pure CBOR utilities (no bridge round-trip) ─────────────
-// parseTransaction is exported from @odatano/core's barrel and runs
-// entirely client-side. Re-export so x402 users don't need a second
-// import for tx introspection. We declare the type loosely (unknown
-// CBOR-parsed shape), consumers cast to ODATANO's `ParsedTransaction`
-// from `@odatano/core` directly if they need the structured fields.
-export const parseTransaction = od ? (od as unknown as { parseTransaction?: (cborHex: string) => unknown }).parseTransaction : undefined;
+// ─── Pure CBOR parse (no chain call, no init) ─────────────────────────
+// `parseTransaction` is a pure, Buildooor-backed export of
+// `@odatano/core` (CSL-free since core@1.8.0). It replaces the local
+// CSL `Transaction`/`FixedTransaction` parsing that decode.ts used to
+// do, so x402 no longer needs a CBOR library of its own. The byte
+// hash it returns (`body.hash`) is byte-preserving, exactly the
+// property the old `FixedTransaction` path relied on.
+
+/** One output of a parsed tx. `assets[].unit` is `policyId+nameHex`. */
+export interface ParsedTxOutput {
+  address: string;
+  lovelace: string;
+  assets: Array<{ unit: string; quantity: string }>;
+  datumHash: string | null;
+  inlineDatumHex: string | null;
+  referenceScriptHex: string | null;
+}
+
+/** Structured shape returned by `@odatano/core`'s `parseTransaction`. */
+export interface ParsedTx {
+  txHash: string;
+  network: 'mainnet' | 'testnet' | null;
+  inputs: Array<{ txHash: string; outputIndex: number }>;
+  outputs: ParsedTxOutput[];
+  /** Validity-range lower bound in slots (decimal string) or null. */
+  validityStart: string | null;
+  /** Validity-range upper bound (TTL) in slots (decimal string) or null. */
+  validityEnd: string | null;
+  fee: string;
+  mint: Array<{ unit: string; quantity: string }>;
+  requiredSigners: string[];
+  scriptDataHash: string | null;
+  witnesses: {
+    vkeyCount: number;
+    nativeScripts: number;
+    plutusScripts: number;
+    plutusData: number;
+    redeemers: number;
+  };
+}
+
+const odParseTransaction = (
+  od as unknown as { parseTransaction?: (cborHex: string) => ParsedTx }
+).parseTransaction;
+
+/**
+ * Parse signed-or-unsigned tx CBOR (hex) into structured fields. Pure,
+ * no init / no chain call. Throws `X402Error(INVALID_CBOR)` on malformed
+ * input so callers in the decode path get a precise, surfaceable code.
+ */
+export function parseTransaction(cborHex: string): ParsedTx {
+  if (typeof odParseTransaction !== 'function') {
+    throw new X402Error(
+      Codes.BRIDGE_UNAVAILABLE,
+      '@odatano/core does not export parseTransaction (need >= 1.9.1)',
+    );
+  }
+  try {
+    return odParseTransaction(cborHex);
+  } catch (err) {
+    throw new X402Error(
+      Codes.INVALID_CBOR,
+      `transaction CBOR did not decode: ${(err as Error)?.message ?? err}`,
+    );
+  }
+}
+
+// ─── Server-side unsigned transfer build (delegated to core) ──────────
+// The browser-buyer flow builds the payment tx server-side (the wallet
+// only signs). We hand the whole job — UTxO fetch, coin selection,
+// change, min-ADA, fee — to core's Buildooor builder rather than
+// hand-rolling it, so x402 carries no tx-construction library of its own.
+
+/** Request shape accepted by core's `build{Simple,MultiAsset}Transaction`. */
+export interface CoreTransferReq {
+  /** Buyer's bech32 — UTxO source and default change address. */
+  senderAddress: string;
+  /** Bech32 recipient (`payTo`). */
+  recipientAddress: string;
+  /** Defaults to `senderAddress`. */
+  changeAddress?: string;
+  /** Output ADA in lovelace (decimal string). For token outputs this is the riding min-ADA. */
+  lovelaceAmount: string;
+  /** Native assets on the output. `unit` = `policyId+assetNameHex`. Omit/empty for pure ADA. */
+  assets?: Array<{ unit: string; quantity: string }>;
+  /** Validity-range upper bound as POSIX ms; core converts to a slot. */
+  validityEndMs?: number;
+}
+
+/** Subset of core's `TxBuildResult` that x402 consumes. */
+export interface CoreTxBuildResult {
+  unsignedTxCbor: string;
+  txBodyHash: string;
+  inputs: Array<{ txHash: string; index: number; lovelace: string }>;
+  outputs: Array<{ address: string; lovelace: string }>;
+  feeLovelace: string;
+}
+
+/**
+ * Build an unsigned transfer tx via core's Buildooor builder. Routes to
+ * the multi-asset entry point when `assets` is non-empty (it rejects an
+ * empty asset list), otherwise the plain-ADA one.
+ */
+export async function buildUnsignedTransfer(
+  req: CoreTransferReq,
+): Promise<CoreTxBuildResult> {
+  await ensureInit();
+  const builder = od.getCardanoTxBuilder();
+  // Core's builder expects core's own protocol-parameter shape, so source
+  // it from the same client rather than re-deriving it here.
+  const params = await od.getCardanoClient().getProtocolParameters();
+  return req.assets && req.assets.length > 0
+    ? builder.buildMultiAssetTransaction(req, params)
+    : builder.buildSimpleAdaTransaction(req, params);
+}

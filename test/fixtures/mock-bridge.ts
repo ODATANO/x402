@@ -22,5 +22,6 @@ export function bridgeFactory() {
     getCurrentSlot: jest.fn(),
     isUtxoUnspent: jest.fn(),
     parseTransaction: jest.fn(),
+    buildUnsignedTransfer: jest.fn(),
   };
 }

@@ -59,6 +59,7 @@ npm-debug.log*
 
 CAP_PROJECT_GUIDE.md
 x402-cardano-integration.md
+release-0.4.0.md
 
 .claude/
 .vscode/

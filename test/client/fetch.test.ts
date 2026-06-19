@@ -8,6 +8,10 @@
  * valid PAYMENT-SIGNATURE header that decode() round-trips.
  */
 
+// decode() pulls in srv/bridge → @odatano/core; stub the barrel to its
+// pure parser (see core-parse-mock) so its uncompiled .ts isn't loaded.
+jest.mock('@odatano/core', () => require('../fixtures/core-parse-mock').coreParseMock());
+
 import { x402Fetch } from '../../srv/client/fetch';
 import { X402PaymentError } from '../../srv/client/errors';
 import { decode } from '../../srv/core/decode';

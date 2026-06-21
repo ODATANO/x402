@@ -14,15 +14,20 @@ const mockClient = {
   getCurrentSlot:        jest.fn(),
   isUtxoUnspent:         jest.fn(),
 };
+const mockTxBuilder = {
+  buildSimpleAdaTransaction:  jest.fn(),
+  buildMultiAssetTransaction: jest.fn(),
+};
 const mockInitialize    = jest.fn();
 const mockShutdown      = jest.fn();
 const mockParseTransaction = jest.fn();
 
 jest.mock('@odatano/core', () => ({
-  initialize:       (...a: unknown[]) => mockInitialize(...a),
-  shutdown:         (...a: unknown[]) => mockShutdown(...a),
-  getCardanoClient: () => mockClient,
-  parseTransaction: (...a: unknown[]) => mockParseTransaction(...a),
+  initialize:          (...a: unknown[]) => mockInitialize(...a),
+  shutdown:            (...a: unknown[]) => mockShutdown(...a),
+  getCardanoClient:    () => mockClient,
+  getCardanoTxBuilder: () => mockTxBuilder,
+  parseTransaction:    (...a: unknown[]) => mockParseTransaction(...a),
 }));
 
 // `bridge` uses a module-level init cache. We must `isolateModules` per
@@ -41,6 +46,7 @@ function loadBridge() {
 
 beforeEach(() => {
   Object.values(mockClient).forEach(fn => fn.mockReset());
+  Object.values(mockTxBuilder).forEach(fn => fn.mockReset());
   mockInitialize.mockReset();
   mockShutdown.mockReset();
   mockParseTransaction.mockReset();
@@ -262,9 +268,97 @@ describe('isUtxoUnspent', () => {
   });
 });
 
-describe('parseTransaction re-export', () => {
-  it('is defined when @odatano/core exports it', () => {
+describe('parseTransaction', () => {
+  it('forwards to @odatano/core and returns the parsed shape', () => {
     const bridge = loadBridge();
-    expect(typeof bridge.parseTransaction).toBe('function');
+    const parsed = { txHash: 'ab'.repeat(32), inputs: [], outputs: [] };
+    mockParseTransaction.mockReturnValue(parsed);
+    expect(bridge.parseTransaction('cafe')).toBe(parsed);
+    expect(mockParseTransaction).toHaveBeenCalledWith('cafe');
+  });
+
+  it('wraps a core parse failure as X402Error(INVALID_CBOR)', () => {
+    const bridge = loadBridge();
+    mockParseTransaction.mockImplementation(() => { throw new Error('bad cbor'); });
+    try {
+      bridge.parseTransaction('deadbeef');
+      throw new Error('expected throw');
+    } catch (e) {
+      expect((e as { code?: string }).code).toBe('invalid_cbor');
+      expect((e as Error).message).toMatch(/bad cbor/);
+    }
+  });
+
+  it('throws BRIDGE_UNAVAILABLE when core does not export parseTransaction', () => {
+    // Re-mock the core barrel without parseTransaction for this module load,
+    // then restore the standard mock so later tests see getCardanoTxBuilder.
+    try {
+      jest.isolateModules(() => {
+        jest.doMock('@odatano/core', () => ({
+          initialize:       (...a: unknown[]) => mockInitialize(...a),
+          shutdown:         (...a: unknown[]) => mockShutdown(...a),
+          getCardanoClient: () => mockClient,
+          // no parseTransaction / getCardanoTxBuilder
+        }));
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const bridge = require('../srv/bridge') as typeof import('../srv/bridge');
+        try {
+          bridge.parseTransaction('cafe');
+          throw new Error('expected throw');
+        } catch (e) {
+          expect((e as { code?: string }).code).toBe('bridge_unavailable');
+        }
+      });
+    } finally {
+      jest.doMock('@odatano/core', () => ({
+        initialize:          (...a: unknown[]) => mockInitialize(...a),
+        shutdown:            (...a: unknown[]) => mockShutdown(...a),
+        getCardanoClient:    () => mockClient,
+        getCardanoTxBuilder: () => mockTxBuilder,
+        parseTransaction:    (...a: unknown[]) => mockParseTransaction(...a),
+      }));
+    }
+  });
+});
+
+describe('buildUnsignedTransfer', () => {
+  const baseReq = {
+    senderAddress:    'addr_test1buyer',
+    recipientAddress: 'addr_test1seller',
+    lovelaceAmount:   '2000000',
+  };
+
+  it('routes a pure-ADA request to buildSimpleAdaTransaction', async () => {
+    const bridge = loadBridge();
+    mockClient.getProtocolParameters.mockResolvedValue({ minFeeA: 44 });
+    mockTxBuilder.buildSimpleAdaTransaction.mockResolvedValue({ unsignedTxCbor: 'aa' });
+
+    const r = await bridge.buildUnsignedTransfer(baseReq);
+    expect(r).toEqual({ unsignedTxCbor: 'aa' });
+    expect(mockTxBuilder.buildSimpleAdaTransaction).toHaveBeenCalledWith(baseReq, { minFeeA: 44 });
+    expect(mockTxBuilder.buildMultiAssetTransaction).not.toHaveBeenCalled();
+  });
+
+  it('routes a request with assets to buildMultiAssetTransaction', async () => {
+    const bridge = loadBridge();
+    const req = { ...baseReq, assets: [{ unit: 'a'.repeat(56) + '4242', quantity: '10' }] };
+    mockClient.getProtocolParameters.mockResolvedValue({ minFeeA: 44 });
+    mockTxBuilder.buildMultiAssetTransaction.mockResolvedValue({ unsignedTxCbor: 'bb' });
+
+    const r = await bridge.buildUnsignedTransfer(req);
+    expect(r).toEqual({ unsignedTxCbor: 'bb' });
+    expect(mockTxBuilder.buildMultiAssetTransaction).toHaveBeenCalledWith(req, { minFeeA: 44 });
+    expect(mockTxBuilder.buildSimpleAdaTransaction).not.toHaveBeenCalled();
+  });
+
+  it('treats an empty assets array as pure-ADA', async () => {
+    const bridge = loadBridge();
+    const req = { ...baseReq, assets: [] };
+    mockClient.getProtocolParameters.mockResolvedValue({});
+    mockTxBuilder.buildSimpleAdaTransaction.mockResolvedValue({ unsignedTxCbor: 'cc' });
+
+    await bridge.buildUnsignedTransfer(req);
+    expect(mockTxBuilder.buildSimpleAdaTransaction).toHaveBeenCalled();
+    expect(mockTxBuilder.buildMultiAssetTransaction).not.toHaveBeenCalled();
   });
 });

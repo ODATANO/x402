@@ -1,7 +1,7 @@
 /**
  * Scripted MCP client that drives server.ts the way an AI agent would:
  * check the wallet, probe the offer, decide, buy. Doubles as the E2E
- * test for the server — no LLM required.
+ * test for the server, no LLM required.
  *
  * Usage:
  *   NETWORK=preview BACKENDS=blockfrost BLOCKFROST_API_KEY=... npm run demo [-- <url>]

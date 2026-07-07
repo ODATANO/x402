@@ -8,7 +8,7 @@ service PricesService @(path: '/odata/v4/prices') {
   /**
    * Seller-side accounting view over the plugin-persisted receipts:
    * one row per settled payment (tx hash, payer, amount, route).
-   * Free to read — absent from routePricing, so the gate skips it.
+   * Free to read, absent from routePricing, so the gate skips it.
    */
   @readonly entity Settlements as projection on x402.X402Receipts;
 

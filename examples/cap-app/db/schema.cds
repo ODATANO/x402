@@ -3,7 +3,7 @@ using { cuid, managed } from '@sap/cds/common';
 
 /**
  * A handful of fake stock-style quotes. Gated behind x402 in the
- * service layer — paying buyers can read; free callers get 402.
+ * service layer, paying buyers can read; free callers get 402.
  */
 entity Quotes : cuid, managed {
   pair      : String(20);       // e.g. 'ADA-USD'
@@ -13,7 +13,7 @@ entity Quotes : cuid, managed {
 }
 
 /**
- * Server self-health. Always free — the bypass regex in the
+ * Server self-health. Always free, the bypass regex in the
  * middleware lets root paths through, and we use a `@readonly`
  * projection that the gate skips by name.
  */

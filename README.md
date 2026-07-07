@@ -16,21 +16,14 @@ Implements the **Cardano-x402-v2** spec on top of [`@odatano/core`](https://www.
 
 ## Use cases
 
-Sell enterprise data per request instead of per API-key contract — no
+Sell enterprise data per request instead of per API-key contract: no
 partner onboarding, no invoicing run, and the same 402 surface serves
-humans, backend services, and AI agents:
+humans, backend services, and AI agents.
 
-| Scenario | Read | Reference implementation |
-|---|---|---|
-| **Pay-per-query data services** — a price feed, master data, or credit-check lookup priced per call; every settled payment is its own receipt | [docs/use-cases/pay-per-query.md](docs/use-cases/pay-per-query.md) | [`cap-app`](examples/cap-app/) + [`node-buyer`](examples/node-buyer/) |
-| **AI agents buying data autonomously** — an MCP server lets any agent probe a price, decide, and pay within a hard budget | [docs/use-cases/ai-agent-payments.md](docs/use-cases/ai-agent-payments.md) | [`agent-buyer`](examples/agent-buyer/) |
-| **Monetized reports & B2B lookups** — variants of pay-per-query: price actions instead of entities, or one-off lookups without onboarding | [docs/use-cases/pay-per-query.md](docs/use-cases/pay-per-query.md#variants-of-the-same-pattern) | [`cap-app`](examples/cap-app/) |
+- **Pay-per-query data services** (including B2B lookups and per-call reports): [docs/use-cases/pay-per-query.md](docs/use-cases/pay-per-query.md)
+- **AI agents buying data autonomously**: [docs/use-cases/ai-agent-payments.md](docs/use-cases/ai-agent-payments.md)
 
-See it run in one command (details under [Examples](#examples)):
-
-```bash
-NETWORK=preview BACKENDS=blockfrost BLOCKFROST_API_KEY=preview_xxx npm run demo
-```
+Each page links its reference implementation; runnable versions are listed under [Examples](#examples).
 
 ## Install
 
@@ -110,10 +103,10 @@ It starts the `cap-app` seller, runs the `node-buyer` buy flow against it (402 �
 
 ## Documentation
 
+Use-case pages are linked above; the technical references:
+
 | Doc | Covers |
 |---|---|
-| [`docs/use-cases/pay-per-query.md`](docs/use-cases/pay-per-query.md) | The pay-per-query business scenario end to end: flow, accounting via receipts, pricing notes, variants |
-| [`docs/use-cases/ai-agent-payments.md`](docs/use-cases/ai-agent-payments.md) | AI agents as buyers: MCP tool surface, key isolation, server-side budgets |
 | [`docs/usage.md`](docs/usage.md) | All five usage patterns + full configuration reference |
 | [`docs/protocol.md`](docs/protocol.md) | Buyer-flow diagram, `PAYMENT-SIGNATURE` envelope, the six mandatory facilitator checks |
 | [`docs/architecture.md`](docs/architecture.md) | Module layout, pure-vs-chain split, plugin auto-discovery |

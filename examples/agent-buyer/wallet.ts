@@ -1,6 +1,6 @@
 /**
  * Agent wallet: raw ed25519 key in a JSON file (same format as
- * examples/node-buyer — point WALLET_FILE at its wallet.json to reuse it,
+ * examples/node-buyer, point WALLET_FILE at its wallet.json to reuse it,
  * or run node-buyer's `npm run generate-wallet` here).
  *
  * TEST NETWORKS ONLY. The key sits unencrypted on disk.

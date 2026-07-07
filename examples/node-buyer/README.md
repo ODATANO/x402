@@ -78,7 +78,7 @@ All via env vars (`@odatano/core` standalone mode):
 |---|---|---|
 | `NETWORK` | `preprod` \| `preview` \| `mainnet` | `preview` |
 | `BACKENDS` | comma-separated: `blockfrost`, `koios`, `ogmios` | `koios` |
-| `BLOCKFROST_API_KEY` | Blockfrost project key for `NETWORK` | — |
+| `BLOCKFROST_API_KEY` | Blockfrost project key for `NETWORK` |, |
 | `WALLET_FILE` | wallet file location | `./wallet.json` |
 
 Note: CAP does not expand `${...}` placeholders in `cds.requires`, so

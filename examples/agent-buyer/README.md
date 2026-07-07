@@ -8,7 +8,7 @@ the on-chain transaction hash as receipt.
 The key stays server-side, and a hard budget caps what a session can
 spend no matter what the model asks for. This is the enterprise
 machine-to-machine story end to end: no account, no API key contract,
-no invoice — an agent pays for exactly the data it needs.
+no invoice: an agent pays for exactly the data it needs.
 
 ## Tools exposed
 
@@ -76,7 +76,7 @@ settlement transaction.
 - **The model never sees the key.** Signing happens inside the server
   process; the tools expose intent (buy/probe), not key material.
 - **Budget is enforced server-side.** `buy_data` re-probes the price
-  itself and checks it against the ceiling and session budget — a
+  itself and checks it against the ceiling and session budget:
   prompt-injected "ignore your budget" cannot bypass it.
 - **Test networks only.** Plain-JSON key on disk; for production, back
   `createSignTx` with a KMS/HSM.

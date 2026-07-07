@@ -72,12 +72,12 @@ hash. The buyer's contract is to **re-send the same `PAYMENT-SIGNATURE`**
 (never pay again); `x402Fetch` / `x402Axios` do this automatically.
 
 A re-send that arrives *after* the tx got indexed would trip check 5:
-the nonce is now spent — by this very payment. To avoid rejecting a
+the nonce is now spent, by this very payment. To avoid rejecting a
 paid buyer with `replay_detected` forever, the facilitator applies a
 fallback: if the envelope's own tx is on chain and its server-observed
 `blockTime` is within `pendingGraceMs` (default 5 minutes, `0`
 disables), the request is **accepted**. Inside that window the same
-envelope is re-servable — an implicit mini-grant, deliberately
+envelope is re-servable, an implicit mini-grant, deliberately
 equivalent in spirit to the `X402Grants` feature. Consequence for
 consumers: `onAccepted` (and the receipts INSERT, which dedupes on
 `txHash`) can fire more than once per payment inside the window, so

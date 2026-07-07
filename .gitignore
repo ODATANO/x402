@@ -3,6 +3,7 @@ _out
 *.db
 *.sqlite
 examples/**/dist/
+release-*.md
 connection.properties
 default-*.json
 .cdsrc-private.json

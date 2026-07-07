@@ -1,6 +1,6 @@
 /**
  * x402 agent-buyer: an MCP server that lets an AI agent buy x402-gated
- * data autonomously — probe the price, decide, pay on Cardano, return
+ * data autonomously: probe the price, decide, pay on Cardano, return
  * the data with the on-chain receipt.
  *
  * The agent never touches the key: signing happens in-process, and a
@@ -8,9 +8,9 @@
  * model asks for.
  *
  * Tools:
- *   get_offer(url)                    — probe an endpoint, report price/asset/network
- *   buy_data(url, maxPriceLovelace?)  — pay and fetch, enforcing price ceiling + session budget
- *   wallet_status()                   — address, balance, budget remaining, purchases so far
+ *   get_offer(url)                    - probe an endpoint, report price/asset/network
+ *   buy_data(url, maxPriceLovelace?)  - pay and fetch, enforcing price ceiling + session budget
+ *   wallet_status()                   - address, balance, budget remaining, purchases so far
  *
  * Env: NETWORK / BACKENDS / BLOCKFROST_API_KEY (backend, as in node-buyer),
  *      WALLET_FILE (default ./wallet.json),
@@ -18,7 +18,7 @@
  *      X402_SESSION_BUDGET_LOVELACE  total session cap (default 10 ADA).
  */
 
-import './redirect-console'; // keep stdout clean for MCP — must stay first
+import './redirect-console'; // keep stdout clean for MCP, must stay first
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';

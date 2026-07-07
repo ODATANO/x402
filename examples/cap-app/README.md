@@ -2,7 +2,7 @@
 
 A pay-per-query data service on SAP CAP: a price feed sold per request
 instead of per API-key contract. Every settled payment lands as a row
-in a free `Settlements` view — the seller's accounting without an
+in a free `Settlements` view, the seller's accounting without an
 invoicing run, the payment itself is the receipt.
 
 ## What it shows
@@ -21,7 +21,7 @@ invoicing run, the payment itself is the receipt.
 | `/odata/v4/prices/Quotes` | GET | 1 ADA (or token) | gated, multi-accept |
 | `/odata/v4/prices/Quotes(<ID>)` | GET | 1 ADA (or token) | gated |
 | `/odata/v4/prices/getBestPrice(pair='ADA-USD')` | POST | 2 ADA | gated |
-| `/odata/v4/prices/Settlements` | GET | - | **free** — one row per settled payment |
+| `/odata/v4/prices/Settlements` | GET | - | **free**, one row per settled payment |
 | `/odata/v4/prices/Health` | GET | - | **free** (absent from routePricing) |
 | `/health` | GET | - | CAP-built-in health |
 | `/$metadata` | GET | - | bypass regex |
@@ -77,9 +77,9 @@ The 402 response body looks like:
 
 Use one of the buyer examples against this seller:
 
-- [`examples/node-buyer`](../node-buyer/) — headless CLI buyer, the fastest full round-trip
-- [`examples/agent-buyer`](../agent-buyer/) — MCP server so an AI agent buys autonomously
-- [`examples/browser-buyer`](../browser-buyer/) — CIP-30 wallet in the browser
+- [`examples/node-buyer`](../node-buyer/), headless CLI buyer, the fastest full round-trip
+- [`examples/agent-buyer`](../agent-buyer/), MCP server so an AI agent buys autonomously
+- [`examples/browser-buyer`](../browser-buyer/), CIP-30 wallet in the browser
 
 Rolling your own: build an unsigned tx with `buildUnsignedPaymentTx`, sign it,
 base64-encode the signed CBOR + nonce-UTxO ref into a `PAYMENT-SIGNATURE`

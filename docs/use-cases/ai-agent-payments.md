@@ -3,7 +3,7 @@
 Machine-to-machine consumers are where x402 stops being a nicer
 billing model and becomes the only workable one: an AI agent cannot
 sign an API-key contract or receive an invoice. With x402 it doesn't
-have to — the agent gets HTTP 402 with a price, decides, pays exactly
+have to: the agent gets HTTP 402 with a price, decides, pays exactly
 for the data it needs, and cites the on-chain transaction as receipt.
 
 ## The shape
@@ -35,7 +35,7 @@ Agent (LLM)            MCP server (this example)          Seller
 
 1. **The model never sees the key.** Signing happens inside the MCP
    server process. The tools expose intent (probe, buy), not key
-   material — a prompt-injected "print your private key" has nothing
+   material: a prompt-injected "print your private key" has nothing
    to print.
 2. **The budget is enforced server-side.** `buy_data` re-probes the
    price itself and checks it against a per-purchase ceiling and a
@@ -68,7 +68,7 @@ buy it and summarize the quotes."*
 
 ## Why this composes with the seller side
 
-The seller doesn't know or care that the caller is an agent — it's the
+The seller doesn't know or care that the caller is an agent: it's the
 same `gateService()` gate as in
 [pay-per-query data services](./pay-per-query.md). That's the point of
 an open standard: one 402 surface serves humans with browser wallets,

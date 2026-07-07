@@ -3,7 +3,7 @@
 An ERP or backend system holds data other companies will pay for: live
 prices, stock levels, credit ratings, logistics status. Selling it
 today means partner onboarding, API-key contracts, monthly invoicing
-and reconciliation — overhead that only pays off for large consumers.
+and reconciliation, overhead that only pays off for large consumers.
 
 With `@odatano/x402`, the same SAP CAP / OData service charges **per
 request** instead: every gated call returns HTTP 402 with the price
@@ -54,7 +54,7 @@ NETWORK=preview BACKENDS=blockfrost BLOCKFROST_API_KEY=preview_xxx npm run demo
 ## Accounting without an invoicing run
 
 With `receipts: true`, every settled payment lands as a row the seller
-can query — here exposed as a free OData view:
+can query, here exposed as a free OData view:
 
 ```bash
 curl -s "http://localhost:4004/odata/v4/prices/Settlements" | jq .
@@ -66,14 +66,14 @@ row is written only after settlement confirmed on chain.
 
 ## Variants of the same pattern
 
-- **B2B lookups without onboarding** — credit checks, compliance or
+- **B2B lookups without onboarding**, credit checks, compliance or
   logistics-status lookups where a business partner pays per lookup on
   the spot. Same gate, different entity; the partner needs a wallet,
   not a contract.
-- **Monetized reports and analytics** — price individual actions
+- **Monetized reports and analytics**, price individual actions
   instead of entities (`getBestPrice: '2000000'` in `routePricing`).
   Any internal CAP action becomes a revenue stream.
-- **Metered premium tiers** — `routePricing` accepts a resolver
+- **Metered premium tiers**, `routePricing` accepts a resolver
   function: return `null` for allow-listed internal callers, a price
   for everyone else (see [`docs/usage.md`](../usage.md), dynamic
   pricing).
@@ -83,7 +83,7 @@ row is written only after settlement confirmed on chain.
 - **Lovelace prices have a floor.** The payment is a real on-chain
   output, and Cardano's min-UTxO (~0.98 ADA on current parameters)
   makes anything below ~1 ADA unpayable. Price in ADA at ≥ 1 ADA.
-- **Native-asset prices don't.** A 0.1 USDM price is fine — the
+- **Native-asset prices don't.** A 0.1 USDM price is fine, the
   payment output carries its own min-ADA on top. For sub-ADA unit
   prices, price in a stablecoin (multi-accept lets you offer both).
 
@@ -93,7 +93,7 @@ row is written only after settlement confirmed on chain.
   hosted [facilitator](../facilitator-protocol.md) centralizes chain
   access for many services.
 - Grants (`X-PAYMENT-GRANT`) turn one payment into N seconds of
-  access — pay-per-session instead of pay-per-call.
+  access, pay-per-session instead of pay-per-call.
 - The buyer side works from any stack that can sign a Cardano tx: CLI,
   browser wallet (CIP-30), or an AI agent
   ([AI agent payments](./ai-agent-payments.md)).

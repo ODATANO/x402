@@ -18,7 +18,11 @@
  *     returns `{ unsignedTxCborHex, nonceRef }`.
  */
 
-import { x402Fetch, X402PaymentError } from '@odatano/x402';
+// Deep-import the pure client modules rather than the package barrel:
+// the barrel re-exports the server side (middlewares, bridge), which
+// would drag @sap/cds and express into the browser bundle.
+import { x402Fetch } from '@odatano/x402/srv/client/fetch';
+import { X402PaymentError } from '@odatano/x402/srv/client/errors';
 import type { PaymentRequirementEntry } from '@odatano/x402';
 
 // ─── CIP-30 wallet type (minimal subset we use) ──────────────────────────

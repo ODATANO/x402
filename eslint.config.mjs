@@ -17,6 +17,7 @@ export default [
       'examples/**/srv/**/*.js',
       'examples/**/srv/**/*.d.ts',
       'examples/**/gen/**',
+      'examples/**/dist/**',
       'coverage/**',
       'gen/**',
     ],

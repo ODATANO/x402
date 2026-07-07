@@ -13,9 +13,9 @@
  *     }
  *   }))
  *
- * Pure function, no chain calls, no I/O. Callable from any runtime
- * that has `Buffer` (Node) or a polyfill (browser bundlers usually
- * provide one via `buffer`).
+ * Pure function, no chain calls, no I/O. Runtime-neutral: uses `Buffer`
+ * where available (Node) and falls back to `btoa` (browsers), so
+ * bundlers need no Buffer polyfill.
  */
 
 import type { Network } from '../core/network';
@@ -23,6 +23,25 @@ import type { PaymentEnvelope } from '../core/types';
 
 const NONCE_RE = /^[0-9a-f]{64}#\d+$/i;
 const HEX_RE   = /^[0-9a-f]+$/i;
+
+function bytesToBase64(bytes: Uint8Array): string {
+  if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64');
+  // Browser path: build a binary string in chunks (spread has arg limits).
+  let bin = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(bin);
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
 
 export interface EncodeEnvelopeArgs {
   network: Network;
@@ -57,10 +76,10 @@ export function encodePaymentEnvelope(args: EncodeEnvelopeArgs): string {
     scheme:      'exact',
     network:     args.network,
     payload: {
-      transaction: Buffer.from(args.signedTxCborHex, 'hex').toString('base64'),
+      transaction: bytesToBase64(hexToBytes(args.signedTxCborHex)),
       nonce:       args.nonceRef,
     },
   };
 
-  return Buffer.from(JSON.stringify(envelope), 'utf8').toString('base64');
+  return bytesToBase64(new TextEncoder().encode(JSON.stringify(envelope)));
 }

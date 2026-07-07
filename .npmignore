@@ -26,6 +26,7 @@ eslint.config.mjs
 # --- Repo docs (only README.md ships) ---
 docs/
 plan.md
+release-*.md
 CAP_PROJECT_GUIDE.md
 x402-cardano-integration.md
 

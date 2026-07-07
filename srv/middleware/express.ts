@@ -80,6 +80,11 @@ export interface X402MiddlewareOptions {
   /** If true, accept tx with no TTL set. Default false (spec-strict). */
   allowNoTtl?: boolean;
   /**
+   * Pending-retry grace window (ms). Default 300_000; 0 disables.
+   * See `ProcessArgs.pendingGraceMs` (facilitator/verify.ts).
+   */
+  pendingGraceMs?: number;
+  /**
    * Audit / persistence callback. Invoked exactly once per accepted
    * payment, after settle confirms. Errors here are logged but never
    * block serving the response.
@@ -148,6 +153,9 @@ export function x402Middleware(opts: X402MiddlewareOptions): RequestHandler {
       };
       if (opts.settlePollBudgetMs !== undefined) {
         processArgs.settlePollBudgetMs = opts.settlePollBudgetMs;
+      }
+      if (opts.pendingGraceMs !== undefined) {
+        processArgs.pendingGraceMs = opts.pendingGraceMs;
       }
       if (opts.allowNoTtl) processArgs.allowNoTtl = true;
       if (opts.onAccepted) {

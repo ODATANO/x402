@@ -16,7 +16,9 @@ export class PricesService extends cds.ApplicationService {
       payTo:   'addr_test1...',
       network: 'cardano:preprod',
       asset:   'lovelace',
-      routePricing: { Quotes: '500000', getBestPrice: '1000000' },
+      // Lovelace prices must clear Cardano's min-UTxO (~0.98 ADA on
+      // current params); 1 ADA is the practical floor.
+      routePricing: { Quotes: '1000000', getBestPrice: '2000000' },
       onAccepted: async (claim, req) => {
         console.log(`paid ${claim.amountUnits} ${claim.asset} (tx=${claim.txHash})`);
       },
@@ -252,19 +254,24 @@ interface PricingContext {
 }
 ```
 
-#### Multi-accept example , "0.5 ADA *or* 0.1 USDM"
+#### Multi-accept example , "1 ADA *or* 0.1 USDM"
 
 ```typescript
 gateService(this, {
   payTo, network: 'cardano:preprod', asset: 'lovelace',
   routePricing: {
     Quotes: [
-      { amount: '500000' },                                              // 0.5 ADA
+      { amount: '1000000' },                                             // 1 ADA
       { amount: '100000', asset: '16a55b…ddde.0014df105553444d' },       // 0.1 USDM
     ],
   },
 });
 ```
+
+Native-asset prices (like the USDM entry) can be arbitrarily small, the
+payment output carries its own min-ADA on top. Lovelace prices below
+Cardano's min-UTxO (~0.98 ADA) are unpayable: the ledger rejects the
+output, so no compliant buyer can satisfy them.
 
 The buyer picks one implicitly by which `(payTo, asset)` the payment tx
 actually credits; the facilitator's `pickRequirement()` selects the
@@ -279,9 +286,9 @@ x402Middleware({
     if (ctx.headers['x-api-key'] === process.env.INTERNAL_KEY) return null;     // bypass
     const tier = String(ctx.headers['x-tier'] ?? 'free');
     if (tier === 'free')      return null;
-    if (tier === 'gold')      return '500000';
-    if (tier === 'platinum')  return '100000';
-    return '1000000';
+    if (tier === 'gold')      return '1500000';
+    if (tier === 'platinum')  return '1000000';
+    return '2000000';
   },
 });
 ```

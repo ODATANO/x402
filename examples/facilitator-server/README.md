@@ -12,8 +12,11 @@ BLOCKFROST_API_KEY=preprod_xxx FACILITATOR_API_KEY=secret npm start
 # → [facilitator] listening on http://127.0.0.1:4040/v1
 ```
 
-`BLOCKFROST_API_KEY` is consumed by `@odatano/core`; the Cardano backend
-is configured in `package.json` under `cds.requires.odatano-core`.
+Network and backend are configured in `package.json` under
+`cds.requires.odatano-core`; the Blockfrost key comes from the
+`BLOCKFROST_API_KEY` env var. (CAP does not expand `${...}` placeholders
+in `cds.requires`, so the key must stay out of `package.json`,
+`@odatano/core` falls back to the env var when the config omits it.)
 
 ## Endpoints
 

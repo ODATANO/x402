@@ -50,6 +50,18 @@ export interface X402ClientOptions {
    */
   maxRetries?: number;
   /**
+   * How many times to re-send the SAME `PAYMENT-SIGNATURE` after the
+   * server answered 402 with `pending: true` (payment submitted but not
+   * yet visible on chain, the v2 contract is "retry the same envelope").
+   * These re-sends do NOT invoke the pay handler and do NOT count
+   * against `maxRetries`. Each server-side attempt blocks in its settle
+   * poll (~60s default), so total wait ≈ pendingRetries × poll budget.
+   * Default 5.
+   */
+  pendingRetries?: number;
+  /** Delay in ms between pending re-sends. Default 2000. */
+  pendingRetryDelayMs?: number;
+  /**
    * When `true`, throw an `X402PaymentError` after retries are
    * exhausted (or when the 402 body is malformed). Default `false`:
    *

@@ -1,0 +1,24 @@
+{
+  "name": "@odatano/x402-example-agent-buyer",
+  "version": "0.0.0",
+  "private": true,
+  "description": "MCP server that lets an AI agent buy x402-gated data autonomously, with a hard spend budget.",
+  "scripts": {
+    "start": "tsx server.ts",
+    "demo": "tsx demo.ts"
+  },
+  "dependencies": {
+    "@harmoniclabs/buildooor": "^0.2.6",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@odatano/core": "^1.9.1",
+    "@odatano/x402": "*",
+    "@sap/cds": "^9",
+    "express": "^4",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "tsx": "^4",
+    "typescript": "^5"
+  }
+}

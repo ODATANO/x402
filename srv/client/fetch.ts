@@ -41,12 +41,17 @@ export function x402Fetch(opts: X402FetchOptions): FetchFn {
     throw new TypeError('x402Fetch: no fetch implementation available (Node ≥18 or pass opts.fetch)');
   }
 
-  const maxRetries  = opts.maxRetries ?? 1;
-  const selectFirst = (a: PaymentRequirementEntry[]) => a[0];
-  const select      = opts.selectAccepts ?? selectFirst;
+  const maxRetries     = opts.maxRetries ?? 1;
+  const pendingRetries = opts.pendingRetries ?? 5;
+  const pendingDelayMs = opts.pendingRetryDelayMs ?? 2_000;
+  const selectFirst    = (a: PaymentRequirementEntry[]) => a[0];
+  const select         = opts.selectAccepts ?? selectFirst;
 
   return async function paidFetch(input, init) {
     let attemptsLeft = maxRetries;
+    let pendingLeft  = pendingRetries;
+    // True once a PAYMENT-SIGNATURE has been attached, i.e. we paid.
+    let paid = false;
     // Contextual typing from FetchFn means we don't need to spell out
     // RequestInfo / RequestInit explicitly, those are DOM-only globals.
     let nextInit = init;
@@ -59,6 +64,38 @@ export function x402Fetch(opts: X402FetchOptions): FetchFn {
     while (true) {
       const res = await baseFetch(input, nextInit);
       if (res.status !== 402) return res;
+
+      // ─── Settlement pending: retry the SAME envelope ────────────────
+      // After we paid, the server may answer 402 with `pending: true`
+      // (tx submitted but not yet indexed). The v2 contract is to
+      // re-send the same PAYMENT-SIGNATURE, NOT to pay again: each
+      // server attempt blocks in its settle poll until the tx lands.
+      if (paid && pendingLeft > 0) {
+        let pendingBody: PaymentRequirementsBody & { pending?: boolean } | undefined;
+        try {
+          pendingBody = await res.clone().json() as PaymentRequirementsBody & { pending?: boolean };
+        } catch { /* not JSON → fall through to normal handling */ }
+        if (pendingBody?.pending === true && pendingBody.x402Version === 2) {
+          lastBody = pendingBody;
+          pendingLeft--;
+          await new Promise(r => setTimeout(r, pendingDelayMs));
+          continue;
+        }
+      } else if (paid && pendingLeft <= 0) {
+        // Pending re-sends exhausted: the buyer HAS paid but the tx
+        // never became visible within our budget.
+        let pendingBody: PaymentRequirementsBody & { pending?: boolean } | undefined;
+        try {
+          pendingBody = await res.clone().json() as PaymentRequirementsBody & { pending?: boolean };
+        } catch { /* fall through */ }
+        if (pendingBody?.pending === true) {
+          if (opts.errorOnFailure) {
+            throw paymentErrorFromBody(pendingBody, { kind: 'settlement_pending', httpStatus: res.status });
+          }
+          return res;
+        }
+      }
+
       if (attemptsLeft <= 0) {
         if (opts.errorOnFailure) {
           // Use the last successfully-parsed 402 body if we have one
@@ -142,6 +179,7 @@ export function x402Fetch(opts: X402FetchOptions): FetchFn {
       mergedHeaders.set('PAYMENT-SIGNATURE', header);
       nextInit = { ...(nextInit ?? init ?? {}), headers: mergedHeaders };
 
+      paid = true;
       attemptsLeft--;
     }
   };

@@ -47,6 +47,11 @@ export interface FacilitatorVerifyAndSettleArgs {
   /** Allow txs without a validity-range upper bound. Default false. */
   allowNoTtl?: boolean;
   /**
+   * Pending-retry grace window (ms). Default 300_000; 0 disables.
+   * See `ProcessArgs.pendingGraceMs` for semantics and trade-off.
+   */
+  pendingGraceMs?: number;
+  /**
    * Best-effort audit callback. Invoked exactly once on `accepted`.
    * **Not transmittable over HTTP**, the http facilitator wrapper
    * invokes it locally after the remote call returns.

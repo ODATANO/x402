@@ -64,6 +64,25 @@ Every accepted payment passes all six (in order):
 
 Plus a sanity guard: tx has at least one vkey witness → `unsigned_transaction`.
 
+### Pending settlements and the check-5 grace window
+
+When submit succeeds but the tx is not indexed within the settle poll
+budget (~60s), the server answers `402` with `pending: true` + the tx
+hash. The buyer's contract is to **re-send the same `PAYMENT-SIGNATURE`**
+(never pay again); `x402Fetch` / `x402Axios` do this automatically.
+
+A re-send that arrives *after* the tx got indexed would trip check 5:
+the nonce is now spent — by this very payment. To avoid rejecting a
+paid buyer with `replay_detected` forever, the facilitator applies a
+fallback: if the envelope's own tx is on chain and its server-observed
+`blockTime` is within `pendingGraceMs` (default 5 minutes, `0`
+disables), the request is **accepted**. Inside that window the same
+envelope is re-servable — an implicit mini-grant, deliberately
+equivalent in spirit to the `X402Grants` feature. Consequence for
+consumers: `onAccepted` (and the receipts INSERT, which dedupes on
+`txHash`) can fire more than once per payment inside the window, so
+audit callbacks must be idempotent on `claim.txHash`.
+
 Rejected requests get `402` with an `error` field of the form `"<base> (<code>): <reason>"` so clients can parse the code without breaking wire format.
 
 The full list of `code` values lives in [`facilitator-protocol.md`](facilitator-protocol.md#canonical-code-values).

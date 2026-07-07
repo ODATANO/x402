@@ -24,6 +24,12 @@
  *                              repeated failure.
  *   - 'invalid_402_body'     , the server returned 402 but the body
  *                              wasn't a v2 PaymentRequirementsBody.
+ *   - 'settlement_pending'   , the payment tx was submitted (the 402
+ *                              body carried `pending: true` + the tx
+ *                              hash) but did not become visible on
+ *                              chain within `pendingRetries` re-sends.
+ *                              The buyer HAS paid; retry the same
+ *                              request later rather than paying again.
  *
  * The class is plain (no abstract methods, no fluent builders) so users
  * can construct it themselves if they're wrapping the wrappers.
@@ -35,7 +41,8 @@ export type X402PaymentErrorKind =
   | 'server_rejected'
   | 'retries_exhausted'
   | 'pay_handler_failed'
-  | 'invalid_402_body';
+  | 'invalid_402_body'
+  | 'settlement_pending';
 
 export interface X402PaymentErrorInit {
   message: string;

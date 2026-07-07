@@ -71,6 +71,11 @@ export interface X402CapOptions {
   extra?: Record<string, unknown>;
   settlePollBudgetMs?: number;
   allowNoTtl?: boolean;
+  /**
+   * Pending-retry grace window (ms). Default 300_000; 0 disables.
+   * See `ProcessArgs.pendingGraceMs` (facilitator/verify.ts).
+   */
+  pendingGraceMs?: number;
   onAccepted?: (claim: PaymentClaim, req: cds.Request) => void | Promise<void>;
   /**
    * Optional resource URL builder. Defaults to the request's HTTP URL
@@ -263,6 +268,9 @@ export function gateService<S extends cds.Service>(srv: S, opts: X402CapOptions)
     };
     if (opts.settlePollBudgetMs !== undefined) {
       processArgs.settlePollBudgetMs = opts.settlePollBudgetMs;
+    }
+    if (opts.pendingGraceMs !== undefined) {
+      processArgs.pendingGraceMs = opts.pendingGraceMs;
     }
     if (opts.allowNoTtl) processArgs.allowNoTtl = true;
     // Chain receipts INSERT before the user's onAccepted so consumers

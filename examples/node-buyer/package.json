@@ -1,0 +1,23 @@
+{
+  "name": "@odatano/x402-example-node-buyer",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Headless Node buyer: local ed25519 key + x402Fetch paying an x402-gated API end to end, no browser wallet.",
+  "scripts": {
+    "generate-wallet": "tsx generate-wallet.ts",
+    "balance": "tsx balance.ts",
+    "buy": "tsx buy.ts"
+  },
+  "dependencies": {
+    "@harmoniclabs/buildooor": "^0.2.6",
+    "@odatano/core": "^1.9.1",
+    "@odatano/x402": "*",
+    "@sap/cds": "^9",
+    "express": "^4"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "tsx": "^4",
+    "typescript": "^5"
+  }
+}

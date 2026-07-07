@@ -161,6 +161,7 @@ export function createFacilitatorRouter(opts: CreateFacilitatorRouterOptions = {
       paymentHeader:    body.paymentHeader,
       requirementsBody: body.requirementsBody,
       ...(body.settlePollBudgetMs !== undefined ? { settlePollBudgetMs: body.settlePollBudgetMs } : {}),
+      ...(body.pendingGraceMs !== undefined ? { pendingGraceMs: body.pendingGraceMs } : {}),
       ...(body.allowNoTtl ? { allowNoTtl: true } : {}),
     };
 

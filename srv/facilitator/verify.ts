@@ -56,6 +56,26 @@ export interface ProcessArgs {
    * validity-range upper bound are rejected.
    */
   allowNoTtl?: boolean;
+  /**
+   * Pending-retry grace window (ms). Default 300_000 (5 min); 0 disables.
+   *
+   * Closes the pending-retry race: a buyer whose payment got a
+   * `402 pending` re-sends the same envelope, but if the tx becomes
+   * visible BETWEEN two re-sends, the nonce check sees the nonce as
+   * spent (by this very payment) and would reject a paid buyer with
+   * REPLAY forever. Within this window, an envelope whose own tx is
+   * already on chain is accepted instead.
+   *
+   * Trade-off (deliberate): the same envelope is re-servable for up to
+   * `pendingGraceMs` after its block timestamp, an implicit mini-grant,
+   * semantically equivalent to the X402Grants feature. The window is
+   * anchored on the server-observed `blockTime` of the tx (not the
+   * buyer-controlled TTL); if the backend reports no blockTime the
+   * fallback does not apply and REPLAY stands. `onAccepted` (and the
+   * receipts INSERT) can fire more than once inside the window, so
+   * consumers' callbacks must be idempotent on `claim.txHash`.
+   */
+  pendingGraceMs?: number;
 }
 
 export type ProcessResult =
@@ -180,6 +200,36 @@ export async function process(args: ProcessArgs): Promise<ProcessResult> {
     outputIndex: decoded.nonce.index,
   });
   if (!nonceResult.ok) {
+    // Pending-retry fallback: the nonce may have been consumed by this
+    // very payment tx. If the envelope's own tx is on chain and young
+    // enough (server-observed blockTime within pendingGraceMs), this is
+    // a paid buyer whose earlier attempt timed out in settle, not a
+    // replay. See the ProcessArgs.pendingGraceMs doc for the trade-off.
+    const graceMs = args.pendingGraceMs ?? 300_000;
+    if (graceMs > 0) {
+      let onChain: { blockTime?: number | null } | null = null;
+      try {
+        onChain = await bridge.getTransactionByHash(decoded.txHash) as { blockTime?: number | null } | null;
+      } catch { /* backend hiccup → keep the REPLAY rejection below */ }
+      const blockTime = typeof onChain?.blockTime === 'number' && onChain.blockTime > 0
+        ? onChain.blockTime
+        : null;
+      if (blockTime != null) {
+        const ageMs = Date.now() - blockTime * 1000;
+        if (ageMs <= graceMs) {
+          log.info(
+            `pending-retry fallback: tx ${decoded.txHash} settled ${Math.max(0, Math.round(ageMs / 1000))}s ago; serving.`,
+          );
+          await runOnAccepted(v.claim, args.onAccepted);
+          return {
+            kind: 'accepted',
+            txHash: v.claim.txHash,
+            payment: v.claim,
+            paymentResponseB64: paymentResponseHeaderB64(v.claim.network, v.claim.txHash),
+          };
+        }
+      }
+    }
     return {
       kind: 'rejected',
       code: nonceResult.code,

@@ -25,4 +25,9 @@ export default [
   // TypeScript-ESLint recommended set so .ts sources actually get linted.
   ...cds.recommended,
   ...tseslint.configs.recommended,
+  // CLI example scripts talk to the user via stdout/stderr by design.
+  {
+    files: ['examples/node-buyer/**/*.ts', 'examples/agent-buyer/**/*.ts', 'scripts/**/*.ts'],
+    rules: { 'no-console': 'off' },
+  },
 ]

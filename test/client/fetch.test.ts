@@ -285,3 +285,74 @@ describe('x402Fetch', () => {
     expect(res.status).toBe(402);
   });
 });
+
+// ─── Settlement-pending re-sends (402 + pending: true) ─────────────────
+
+function res402Pending(): Response {
+  return new Response(
+    JSON.stringify({ ...REQS, pending: true, transaction: signed.txHash }),
+    { status: 402, headers: { 'Content-Type': 'application/json' } },
+  );
+}
+
+describe('x402Fetch settlement pending', () => {
+  it('re-sends the same envelope on pending 402 without paying again', async () => {
+    const inner = jest.fn()
+      .mockResolvedValueOnce(res402())
+      .mockResolvedValueOnce(res402Pending())
+      .mockResolvedValueOnce(res402Pending())
+      .mockResolvedValueOnce(res200());
+    const pay = jest.fn(async () => ({
+      signedTxCborHex: signed.cborHex,
+      nonceRef:        NONCE_REF,
+    }));
+    const paid = x402Fetch({ fetch: inner, pay, pendingRetryDelayMs: 1 });
+
+    const res = await paid('https://api.example/foo');
+    expect(res.status).toBe(200);
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(inner).toHaveBeenCalledTimes(4);
+
+    // Calls 2..4 must carry one identical PAYMENT-SIGNATURE header.
+    const sigs = inner.mock.calls.slice(1).map(
+      ([, init]) => new Headers((init as RequestInit).headers).get('PAYMENT-SIGNATURE'),
+    );
+    expect(sigs[0]).toBeTruthy();
+    expect(new Set(sigs).size).toBe(1);
+  });
+
+  it('throws settlement_pending once pendingRetries are exhausted (errorOnFailure)', async () => {
+    const inner = jest.fn()
+      .mockResolvedValueOnce(res402())
+      .mockResolvedValueOnce(res402Pending())
+      .mockResolvedValueOnce(res402Pending());
+    const pay = jest.fn(async () => ({
+      signedTxCborHex: signed.cborHex,
+      nonceRef:        NONCE_REF,
+    }));
+    const paid = x402Fetch({
+      fetch: inner, pay, errorOnFailure: true,
+      pendingRetries: 1, pendingRetryDelayMs: 1,
+    });
+
+    await expect(paid('https://api.example/foo'))
+      .rejects.toMatchObject({ kind: 'settlement_pending' });
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(inner).toHaveBeenCalledTimes(3);
+  });
+
+  it('ignores a pending flag on the first 402 (nothing paid yet), pays normally', async () => {
+    const inner = jest.fn()
+      .mockResolvedValueOnce(res402Pending())
+      .mockResolvedValueOnce(res200());
+    const pay = jest.fn(async () => ({
+      signedTxCborHex: signed.cborHex,
+      nonceRef:        NONCE_REF,
+    }));
+    const paid = x402Fetch({ fetch: inner, pay, pendingRetryDelayMs: 1 });
+
+    const res = await paid('https://api.example/foo');
+    expect(res.status).toBe(200);
+    expect(pay).toHaveBeenCalledTimes(1);
+  });
+});

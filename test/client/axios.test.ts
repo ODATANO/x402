@@ -247,3 +247,56 @@ describe('x402Axios', () => {
     });
   });
 });
+
+// ─── Settlement-pending re-sends (402 + pending: true) ─────────────────
+
+describe('x402Axios settlement pending', () => {
+  const pendingData = { ...REQS, pending: true, transaction: 'aa'.repeat(32) };
+
+  it('re-sends the same envelope on pending 402 without paying again', async () => {
+    const { instance, calls } = makeShim([
+      { status: 402, data: REQS },
+      { status: 402, data: pendingData },
+      { status: 402, data: pendingData },
+      { status: 200, data: 'paid' },
+    ]);
+    const pay = jest.fn(async () => ({
+      signedTxCborHex: signed.cborHex,
+      nonceRef:        NONCE_REF,
+    }));
+    const client = x402Axios(instance, { pay, pendingRetryDelayMs: 1 });
+
+    const res = await client.request({ headers: {} }) as { status: number };
+    expect(res.status).toBe(200);
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(calls).toHaveLength(4);
+
+    // Calls 2..4 must carry one identical PAYMENT-SIGNATURE header.
+    const sigs = calls.slice(1).map(
+      c => (c.headers as Record<string, unknown>)['PAYMENT-SIGNATURE'],
+    );
+    expect(sigs[0]).toBeTruthy();
+    expect(new Set(sigs).size).toBe(1);
+  });
+
+  it('throws settlement_pending once pendingRetries are exhausted (errorOnFailure)', async () => {
+    const { instance, calls } = makeShim([
+      { status: 402, data: REQS },
+      { status: 402, data: pendingData },
+      { status: 402, data: pendingData },
+    ]);
+    const pay = jest.fn(async () => ({
+      signedTxCborHex: signed.cborHex,
+      nonceRef:        NONCE_REF,
+    }));
+    const client = x402Axios(instance, {
+      pay, errorOnFailure: true,
+      pendingRetries: 1, pendingRetryDelayMs: 1,
+    });
+
+    await expect(client.request({ headers: {} }))
+      .rejects.toMatchObject({ kind: 'settlement_pending' });
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(calls).toHaveLength(3);
+  });
+});

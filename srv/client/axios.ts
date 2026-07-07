@@ -23,6 +23,8 @@ import type { PaymentRequirementsBody, PaymentRequirementEntry } from '../core/t
 
 // Marker key on the config to break infinite-retry loops.
 const RETRY_KEY = '__x402_x402Retries';
+// Marker key counting same-envelope re-sends after a `pending: true` 402.
+const PENDING_KEY = '__x402_x402PendingRetries';
 
 // ─── Structural axios shape ──────────────────────────────────────────
 // We only spell out what we actually touch.
@@ -63,9 +65,11 @@ export function x402Axios<T extends AxiosInstanceLike>(
   if (typeof opts?.pay !== 'function') {
     throw new TypeError('x402Axios: opts.pay must be a function');
   }
-  const maxRetries  = opts.maxRetries ?? 1;
-  const selectFirst = (a: PaymentRequirementEntry[]) => a[0];
-  const select      = opts.selectAccepts ?? selectFirst;
+  const maxRetries     = opts.maxRetries ?? 1;
+  const pendingRetries = opts.pendingRetries ?? 5;
+  const pendingDelayMs = opts.pendingRetryDelayMs ?? 2_000;
+  const selectFirst    = (a: PaymentRequirementEntry[]) => a[0];
+  const select         = opts.selectAccepts ?? selectFirst;
 
   function maybeWrap(
     body: PaymentRequirementsBody | undefined,
@@ -92,8 +96,24 @@ export function x402Axios<T extends AxiosInstanceLike>(
       }
       const cfg = error.config;
       const retries = Number(cfg[RETRY_KEY] ?? 0);
-      const body = error.response.data as PaymentRequirementsBody | undefined;
+      const body = error.response.data as (PaymentRequirementsBody & { pending?: boolean }) | undefined;
       const status = error.response.status;
+
+      // ─── Settlement pending: re-send the SAME envelope ──────────────
+      // Only after we already paid (PAYMENT-SIGNATURE present on cfg).
+      // The v2 contract is to retry the same header, NOT to pay again.
+      const alreadyPaid = !!cfg.headers?.['PAYMENT-SIGNATURE'];
+      if (alreadyPaid && body?.pending === true && body.x402Version === 2) {
+        const pends = Number(cfg[PENDING_KEY] ?? 0);
+        if (pends >= pendingRetries) {
+          if (opts.errorOnFailure) {
+            throw paymentErrorFromBody(body, { kind: 'settlement_pending', httpStatus: status, cause: error });
+          }
+          throw error;
+        }
+        await new Promise(r => setTimeout(r, pendingDelayMs));
+        return instance.request({ ...cfg, [PENDING_KEY]: pends + 1 });
+      }
 
       if (retries >= maxRetries) {
         if (opts.errorOnFailure) {

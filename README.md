@@ -14,6 +14,24 @@ Wire a single `before('*')` hook into your CAP service. Every gated request retu
 
 Implements the **Cardano-x402-v2** spec on top of [`@odatano/core`](https://www.npmjs.com/package/@odatano/core).
 
+## Use cases
+
+Sell enterprise data per request instead of per API-key contract — no
+partner onboarding, no invoicing run, and the same 402 surface serves
+humans, backend services, and AI agents:
+
+| Scenario | Read | Reference implementation |
+|---|---|---|
+| **Pay-per-query data services** — a price feed, master data, or credit-check lookup priced per call; every settled payment is its own receipt | [docs/use-cases/pay-per-query.md](docs/use-cases/pay-per-query.md) | [`cap-app`](examples/cap-app/) + [`node-buyer`](examples/node-buyer/) |
+| **AI agents buying data autonomously** — an MCP server lets any agent probe a price, decide, and pay within a hard budget | [docs/use-cases/ai-agent-payments.md](docs/use-cases/ai-agent-payments.md) | [`agent-buyer`](examples/agent-buyer/) |
+| **Monetized reports & B2B lookups** — variants of pay-per-query: price actions instead of entities, or one-off lookups without onboarding | [docs/use-cases/pay-per-query.md](docs/use-cases/pay-per-query.md#variants-of-the-same-pattern) | [`cap-app`](examples/cap-app/) |
+
+See it run in one command (details under [Examples](#examples)):
+
+```bash
+NETWORK=preview BACKENDS=blockfrost BLOCKFROST_API_KEY=preview_xxx npm run demo
+```
+
 ## Install
 
 ```bash
@@ -36,8 +54,10 @@ export class PricesService extends cds.ApplicationService {
       network: 'cardano:preprod',
       asset:   'lovelace',                // or '<policy>.<nameHex>' for native tokens
       routePricing: {
-        Quotes:       '500000',           // 0.5 ADA per Quotes read
-        getBestPrice: '1000000',          // 1 ADA per getBestPrice action call
+        // Lovelace prices must clear Cardano's min-UTxO (~0.98 ADA),
+        // the payment is a real output; 1 ADA is the practical floor.
+        Quotes:       '1000000',          // 1 ADA per Quotes read
+        getBestPrice: '2000000',          // 2 ADA per getBestPrice action call
       },
     });
     return super.init();
@@ -70,10 +90,30 @@ Configure the Cardano backend in `package.json`:
 - **`Facilitator` adapter:** `localFacilitator()` (default, in-process via `@odatano/core`) or `httpFacilitator()` to delegate verify+settle to a hosted service.
 - **Helpers:** `buildUnsignedPaymentTx` (browser-buyer flow), `verifyConfirmedPayment` (post-paid / subscription).
 
+## Examples
+
+| Example | Role | Shows |
+|---|---|---|
+| [`examples/cap-app/`](examples/cap-app/) | Seller | CAP service with gated entities/actions via `gateService()` |
+| [`examples/node-buyer/`](examples/node-buyer/) | Buyer | Headless machine-to-machine buyer: local key + `x402Fetch`, full 402 → pay → 200 round-trip from the terminal |
+| [`examples/agent-buyer/`](examples/agent-buyer/) | Buyer (AI agent) | MCP server exposing `get_offer`/`buy_data` tools so an AI agent buys gated data autonomously, with a hard spend budget |
+| [`examples/browser-buyer/`](examples/browser-buyer/) | Buyer | CIP-30 wallet + `x402Fetch` in the browser |
+| [`examples/facilitator-server/`](examples/facilitator-server/) | Facilitator | Hosted verify+settle service for `httpFacilitator()` |
+
+Fastest end-to-end demo, one command (needs a funded wallet at `examples/node-buyer/wallet.json`, see its [README](examples/node-buyer/README.md)):
+
+```bash
+NETWORK=preview BACKENDS=blockfrost BLOCKFROST_API_KEY=preview_xxx npm run demo
+```
+
+It starts the `cap-app` seller, runs the `node-buyer` buy flow against it (402 → pay on Cardano → 200), and prints the persisted receipt from the seller's free `Settlements` view.
+
 ## Documentation
 
 | Doc | Covers |
 |---|---|
+| [`docs/use-cases/pay-per-query.md`](docs/use-cases/pay-per-query.md) | The pay-per-query business scenario end to end: flow, accounting via receipts, pricing notes, variants |
+| [`docs/use-cases/ai-agent-payments.md`](docs/use-cases/ai-agent-payments.md) | AI agents as buyers: MCP tool surface, key isolation, server-side budgets |
 | [`docs/usage.md`](docs/usage.md) | All five usage patterns + full configuration reference |
 | [`docs/protocol.md`](docs/protocol.md) | Buyer-flow diagram, `PAYMENT-SIGNATURE` envelope, the six mandatory facilitator checks |
 | [`docs/architecture.md`](docs/architecture.md) | Module layout, pure-vs-chain split, plugin auto-discovery |

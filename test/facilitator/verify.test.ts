@@ -293,3 +293,80 @@ describe('verifyPayment, onAccepted is best-effort', () => {
     expect(onAccepted).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('verifyPayment, pending-retry fallback (spent nonce, own tx on chain)', () => {
+  function spentNonce(blockTimeSecsAgo: number | null) {
+    mockedBridge.isUtxoUnspent.mockResolvedValue(false);
+    mockedBridge.getTransactionByHash.mockResolvedValue(
+      blockTimeSecsAgo == null
+        ? ({ hash: 'x' } as unknown)
+        : ({ hash: 'x', blockTime: Math.floor(Date.now() / 1000) - blockTimeSecsAgo } as unknown),
+    );
+  }
+
+  it('accepts when the payment tx settled within the grace window', async () => {
+    const onAccepted = jest.fn();
+    const envelope = happyEnvelope();
+    spentNonce(30); // settled 30s ago, inside the default 5 min window
+
+    const r = await verifyPayment({
+      paymentHeader: envelope,
+      requirementsBody: requirementsBody(),
+      onAccepted,
+    });
+
+    expect(r.kind).toBe('accepted');
+    if (r.kind === 'accepted') {
+      const { decode } = await import('../../srv/core/decode');
+      expect(r.txHash).toBe(decode(envelope).txHash);
+      expect(r.paymentResponseB64).toBeTruthy();
+    }
+    expect(onAccepted).toHaveBeenCalledTimes(1);
+    // The tx is already on chain; the fallback must not re-submit.
+    expect(mockedBridge.submitTransaction).not.toHaveBeenCalled();
+  });
+
+  it('rejects REPLAY when the tx settled outside the grace window', async () => {
+    spentNonce(400); // 400s ago > default 300s window
+    const r = await verifyPayment({
+      paymentHeader: happyEnvelope(),
+      requirementsBody: requirementsBody(),
+    });
+    expect(r.kind).toBe('rejected');
+    if (r.kind === 'rejected') expect(r.code).toBe(Codes.REPLAY);
+  });
+
+  it('rejects REPLAY when the envelope tx is not on chain (true replay of a foreign spend)', async () => {
+    mockedBridge.isUtxoUnspent.mockResolvedValue(false);
+    mockedBridge.getTransactionByHash.mockResolvedValue(null);
+    const r = await verifyPayment({
+      paymentHeader: happyEnvelope(),
+      requirementsBody: requirementsBody(),
+    });
+    expect(r.kind).toBe('rejected');
+    if (r.kind === 'rejected') expect(r.code).toBe(Codes.REPLAY);
+  });
+
+  it('rejects REPLAY when the backend reports no blockTime (no server-side anchor)', async () => {
+    spentNonce(null);
+    const r = await verifyPayment({
+      paymentHeader: happyEnvelope(),
+      requirementsBody: requirementsBody(),
+    });
+    expect(r.kind).toBe('rejected');
+    if (r.kind === 'rejected') expect(r.code).toBe(Codes.REPLAY);
+  });
+
+  it('pendingGraceMs: 0 disables the fallback entirely', async () => {
+    spentNonce(1);
+    const r = await verifyPayment({
+      paymentHeader: happyEnvelope(),
+      requirementsBody: requirementsBody(),
+      pendingGraceMs: 0,
+    });
+    expect(r.kind).toBe('rejected');
+    if (r.kind === 'rejected') expect(r.code).toBe(Codes.REPLAY);
+    // Disabled means no chain lookup for the fallback either.
+    expect(mockedBridge.getTransactionByHash).not.toHaveBeenCalled();
+  });
+});

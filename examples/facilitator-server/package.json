@@ -22,8 +22,7 @@
     "requires": {
       "odatano-core": {
         "network": "preprod",
-        "backends": ["blockfrost"],
-        "blockfrostApiKey": "${BLOCKFROST_API_KEY}"
+        "backends": ["blockfrost"]
       }
     }
   }

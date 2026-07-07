@@ -18,6 +18,7 @@
     "build": "tsc -p tsconfig.build.json",
     "watch": "cds watch",
     "start": "cds-serve",
+    "demo": "tsx scripts/demo.ts",
     "lint": "eslint .",
     "test": "jest",
     "test:coverage": "jest --coverage"

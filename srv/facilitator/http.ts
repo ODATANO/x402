@@ -4,7 +4,7 @@
  * Wire format (see `docs/facilitator-protocol.md` for the full reference):
  *
  *   POST <url>/verify-settle
- *     body: { paymentHeader, requirementsBody, settlePollBudgetMs?, allowNoTtl? }
+ *     body: { paymentHeader, requirementsBody, settlePollBudgetMs?, pendingGraceMs?, allowNoTtl? }
  *     200 → FacilitatorResult (accepted | rejected | pending)
  *     ≥400 → throws Error (the middleware translates to 500 to the buyer)
  *

@@ -82,7 +82,12 @@ export interface PaymentClaim {
   resourceUrl: string;
   /** UTxO-ref nonce as `<txHash>#<index>`. */
   nonceRef: string;
-  /** Earliest of the buyer's input tx hashes; useful for analytics. */
+  /**
+   * Bech32 address of the nonce UTxO, i.e. the buyer's own input, proven by
+   * the signature that spent it. Filled by the facilitator (one
+   * `getTransactionByHash` on the nonce's tx); unset when the backend could
+   * not resolve it. The one payer identity a resource server may bind to.
+   */
   payerAddr?: string;
 }
 

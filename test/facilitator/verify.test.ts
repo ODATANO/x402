@@ -77,7 +77,13 @@ describe('verifyPayment, happy path', () => {
       expect(cborHex).toBe(decoded.txCborHex);
       return decoded.txHash;
     });
-    mockedBridge.getTransactionByHash.mockResolvedValue({ hash: 'ok' } as unknown);
+    // The nonce's tx answers with the buyer's output; the payment tx just exists.
+    const { decode: decodeEnv } = await import('../../srv/core/decode');
+    const nonce = decodeEnv(envelope).nonce;
+    mockedBridge.getTransactionByHash.mockImplementation(async (hash: string) =>
+      hash === nonce.txHash
+        ? ({ hash, outputs: [{ address: 'addr_test1other', outputIndex: nonce.index + 1 }, { address: 'addr_test1buyer', outputIndex: nonce.index }] } as unknown)
+        : ({ hash: 'ok' } as unknown));
 
     const r = await verifyPayment({
       paymentHeader: envelope,
@@ -89,12 +95,40 @@ describe('verifyPayment, happy path', () => {
     if (r.kind === 'accepted') {
       expect(r.payment.network).toBe(NETWORK_PREPROD);
       expect(r.payment.amountUnits).toBe('1000000');
+      expect(r.payment.payerAddr).toBe('addr_test1buyer');
       expect(r.paymentResponseB64).toBeTruthy();
       // base64 of {success:true, network, transaction:txHash}
       const decoded = JSON.parse(Buffer.from(r.paymentResponseB64, 'base64').toString('utf8'));
       expect(decoded).toMatchObject({ success: true, network: NETWORK_PREPROD });
     }
     expect(onAccepted).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('verifyPayment, payer address is best-effort', () => {
+  it('accepts without payerAddr when the nonce tx cannot be read', async () => {
+    const envelope = happyEnvelope();
+    const { decode } = await import('../../srv/core/decode');
+    const decoded = decode(envelope);
+    mockedBridge.submitTransaction.mockResolvedValue(decoded.txHash);
+    mockedBridge.getTransactionByHash.mockImplementation(async (hash: string) => {
+      if (hash === decoded.nonce.txHash) throw new Error('backend down');
+      return { hash: 'ok' } as unknown;
+    });
+    const r = await verifyPayment({ paymentHeader: envelope, requirementsBody: requirementsBody() });
+    expect(r.kind).toBe('accepted');
+    if (r.kind === 'accepted') expect(r.payment.payerAddr).toBeUndefined();
+  });
+
+  it('accepts without payerAddr when the output is not there', async () => {
+    const envelope = happyEnvelope();
+    const { decode } = await import('../../srv/core/decode');
+    const decoded = decode(envelope);
+    mockedBridge.submitTransaction.mockResolvedValue(decoded.txHash);
+    mockedBridge.getTransactionByHash.mockResolvedValue({ hash: 'ok', outputs: [] } as unknown);
+    const r = await verifyPayment({ paymentHeader: envelope, requirementsBody: requirementsBody() });
+    expect(r.kind).toBe('accepted');
+    if (r.kind === 'accepted') expect(r.payment.payerAddr).toBeUndefined();
   });
 });
 

@@ -4,6 +4,15 @@ All notable changes to `@odatano/x402` are documented here. The format follows [
 
 **Pre-1.0 caveat:** minor versions may include breaking changes until `1.0.0`.
 
+## [0.5.2] - 2026-09-19
+
+### Added
+- **`payerAddr` on the `PaymentClaim`.** The facilitator now resolves the address of the nonce UTxO (the buyer's own input, proven by the signature that spent it) with one `getTransactionByHash` after the nonce check, and hands it to `onAccepted`, the receipts / grants rows and the HTTP `accepted` answer (`payment.payerAddr`). Best-effort: a backend miss leaves it unset and never rejects a payment. Resource servers can bind a purchase to the payer (address-bound keys, per-address grants) without asking the buyer to prove the address a second time.
+
+### Fixed
+- **Peer range admits `@odatano/core` 2.0 prereleases.** `>=1.9.1` excluded every `2.0.0-rc.*` (semver only lets a prerelease satisfy a range that names a prerelease on the same version), so pairing x402 with the current core needed `--legacy-peer-deps`. Now `>=1.9.1 || >=2.0.0-0`.
+- **`examples/node-buyer` signs with extended keys.** `createSignTx` handed every key to `new PrivateKey`, which takes a 32-byte seed only; cardano-cli `PaymentExtendedSigningKey…` files (`5880…`, 128 bytes) failed. Extended keys (64 or 128 bytes hex) now go to `Tx.signWith` as raw bytes, which builds the XPrv itself.
+
 ## [0.5.0] - 2026-07-07
 
 ### Added

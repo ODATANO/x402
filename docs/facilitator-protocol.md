@@ -95,7 +95,8 @@ One of three discriminated `kind`s:
     "asset":       "lovelace",
     "payTo":       "addr_test1...",             // verified recipient
     "resourceUrl": "/odata/v4/prices/Quotes",
-    "nonceRef":    "<txHash>#<index>"
+    "nonceRef":    "<txHash>#<index>",
+    "payerAddr":   "addr_test1..."                // optional: the nonce UTxO's address = the buyer (0.5.2+)
   },
   "paymentResponseB64": "<base64 of { success:true, network, transaction }>"
 }

@@ -175,10 +175,9 @@ export function validatePayment(
   }
 
   // ─── All structural checks pass ────────────────────────────────────
-  // `payerAddr` is intentionally omitted here, we don't have the
-  // buyer's input addresses without resolving the referenced UTxOs.
-  // The facilitator can fill it in via `bridge.getTransactionByHash`
-  // on the nonce input, if the caller cares for audit purposes.
+  // `payerAddr` is not known here: it is the address of the nonce UTxO,
+  // which needs a chain read. The facilitator fills it in after the nonce
+  // check (srv/facilitator/payer.ts).
   const network = requirements.network as Network;
   return {
     ok: true,

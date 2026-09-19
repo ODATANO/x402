@@ -26,6 +26,7 @@ import { decode } from '../core/decode';
 import { validatePayment, pickRequirement } from '../core/validate';
 import { Codes, X402Error, type X402Code } from '../core/errors';
 import { checkNonceUnspent } from './nonce';
+import { resolvePayerAddress } from './payer';
 import { settle, type SettleArgs } from './settle';
 import * as bridge from '../bridge';
 import type {
@@ -104,6 +105,12 @@ function paymentResponseHeaderB64(network: string, txHash: string): string {
   return Buffer.from(JSON.stringify({
     success: true, network, transaction: txHash,
   }), 'utf8').toString('base64');
+}
+
+/** Fills `claim.payerAddr` from the nonce UTxO; a backend miss leaves it unset. */
+async function attachPayer(claim: PaymentClaim, nonce: { txHash: string; index: number }): Promise<void> {
+  const payerAddr = await resolvePayerAddress(nonce);
+  if (payerAddr) claim.payerAddr = payerAddr;
 }
 
 async function runOnAccepted(
@@ -220,6 +227,7 @@ export async function process(args: ProcessArgs): Promise<ProcessResult> {
           log.info(
             `pending-retry fallback: tx ${decoded.txHash} settled ${Math.max(0, Math.round(ageMs / 1000))}s ago; serving.`,
           );
+          await attachPayer(v.claim, decoded.nonce);
           await runOnAccepted(v.claim, args.onAccepted);
           return {
             kind: 'accepted',
@@ -237,6 +245,9 @@ export async function process(args: ProcessArgs): Promise<ProcessResult> {
       requirementsBody: args.requirementsBody,
     };
   }
+
+  // ─── 3b. Who paid: the nonce UTxO's address (best-effort) ───────────
+  await attachPayer(v.claim, decoded.nonce);
 
   // ─── 4. Settle (submit + poll-until-confirmed) ──────────────────────
   const settleArgs: SettleArgs = {

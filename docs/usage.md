@@ -316,7 +316,7 @@ Default entity shape (`odatano.x402.X402Receipts`):
 |------------|-------------|-------|
 | `ID`       | `UUID`      | primary key |
 | `txHash`   | `String(64)`| lowercase hex, `@assert.unique` |
-| `payerAddr`| `String(120)`| nullable; populated if the facilitator resolved it |
+| `payerAddr`| `String(120)`| nullable; the nonce UTxO's address (the buyer's own input), resolved by the facilitator since 0.5.2, null when the backend could not read it |
 | `payTo`    | `String(120)`| bech32 recipient |
 | `asset`    | `String(120)`| `'lovelace'` or `'<policy>.<nameHex>'` |
 | `amount`   | `String(32)` | raw units, BigInt-safe |

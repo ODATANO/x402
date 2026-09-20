@@ -1,4 +1,10 @@
-![PDATANOX402](datano-x402.png)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://cdn.jsdelivr.net/npm/@odatano/brand@1/logos/x402-logo-on-dark.svg">
+    <img src="https://cdn.jsdelivr.net/npm/@odatano/brand@1/logos/x402-logo.svg" alt="x402" height="84">
+  </picture>
+</p>
+
 # @odatano/x402
 
 [![Tests](https://github.com/ODATANO/x402/actions/workflows/test.yaml/badge.svg)](https://github.com/ODATANO/x402/actions/workflows/test.yaml)

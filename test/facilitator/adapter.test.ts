@@ -27,7 +27,6 @@ const REQS: PaymentRequirementsBody = {
     amount:              '1000000',
     payTo:               SELLER_ADDR,
     resource:            { url: '/foo', description: '', mimeType: 'application/json' },
-    assetTransferMethod: 'default',
     maxTimeoutSeconds:   600,
   }],
 };
@@ -61,13 +60,13 @@ describe('localFacilitator', () => {
     expect(r.kind).toBe('rejected');
   });
 
-  it('supported() advertises the three v2 Cardano networks and default transfer method', async () => {
+  it('supported() advertises the three v2 Cardano networks and the default and script transfer methods', async () => {
     const fac = localFacilitator();
     expect(typeof fac.supported).toBe('function');
     const s = await fac.supported!();
     expect(s.networks).toEqual(expect.arrayContaining([
       'cardano:mainnet', 'cardano:preprod', 'cardano:preview',
     ]));
-    expect(s.assetTransferMethods).toContain('default');
+    expect(s.assetTransferMethods).toEqual(['default', 'script']);
   });
 });

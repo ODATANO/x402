@@ -31,6 +31,7 @@
 
 import { process as localProcess } from './verify';
 import type { ProcessArgs, ProcessResult } from './verify';
+import { SUPPORTED_TRANSFER_METHODS } from '../core/transfer-method';
 import type {
   AssetTransferMethod,
   PaymentClaim,
@@ -87,7 +88,7 @@ export function localFacilitator(): Facilitator {
     async supported(): Promise<FacilitatorSupportedResult> {
       return {
         networks:             ['cardano:mainnet', 'cardano:preprod', 'cardano:preview'],
-        assetTransferMethods: ['default'],
+        assetTransferMethods: [...SUPPORTED_TRANSFER_METHODS],
       };
     },
   };

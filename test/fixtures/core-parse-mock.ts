@@ -12,7 +12,10 @@
  * `bridge.parseTransaction` after their `resetAllMocks()`.
  */
 
-/** Drop-in replacement for the `@odatano/core` barrel exposing only parse. */
+/**
+ * Drop-in replacement for the `@odatano/core` barrel exposing parse plus
+ * the two pure script helpers as mocks.
+ */
 export function coreParseMock() {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { parseTransaction } = jest.requireActual('@odatano/core/srv/cbor/parse');
@@ -22,6 +25,8 @@ export function coreParseMock() {
     shutdown: jest.fn(),
     getCardanoClient: jest.fn(),
     getCardanoTxBuilder: jest.fn(),
+    applyScriptParameters: jest.fn(),
+    plutusScriptHash: jest.fn(),
   };
 }
 

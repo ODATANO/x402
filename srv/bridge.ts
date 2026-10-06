@@ -271,6 +271,32 @@ export function parseTransaction(cborHex: string): ParsedTx {
   }
 }
 
+// ─── Plutus script helpers (pure, delegated to core) ─────────────────
+
+/** Script parameter as core's `applyScriptParameters` takes it: PlutusData JSON. */
+export type CoreScriptParam = { int: string } | { bytes: string } | { constr: number; fields: CoreScriptParam[] };
+
+const odScripts = od as unknown as {
+  applyScriptParameters?: (scriptHex: string, params: CoreScriptParam[]) => string;
+  plutusScriptHash?: (scriptHex: string, version: 'plutusV2' | 'plutusV3') => string;
+};
+
+/** CBOR hex of the script with `params` applied, in order. */
+export function applyScriptParameters(scriptHex: string, params: CoreScriptParam[]): string {
+  if (typeof odScripts.applyScriptParameters !== 'function') {
+    throw new X402Error(Codes.BRIDGE_UNAVAILABLE, '@odatano/core does not export applyScriptParameters (need >= 2.0.0-rc.30)');
+  }
+  return odScripts.applyScriptParameters(scriptHex, params);
+}
+
+/** Script hash (56 hex) of a CBOR-wrapped Plutus V2 or V3 script. */
+export function plutusScriptHash(scriptHex: string, version: 'plutusV2' | 'plutusV3'): string {
+  if (typeof odScripts.plutusScriptHash !== 'function') {
+    throw new X402Error(Codes.BRIDGE_UNAVAILABLE, '@odatano/core does not export plutusScriptHash (need >= 2.0.0-rc.30)');
+  }
+  return odScripts.plutusScriptHash(scriptHex, version);
+}
+
 // ─── Server-side unsigned transfer build (delegated to core) ──────────
 // The browser-buyer flow builds the payment tx server-side (the wallet
 // only signs). We hand the whole job — UTxO fetch, coin selection,
@@ -291,6 +317,10 @@ export interface CoreTransferReq {
   assets?: Array<{ unit: string; quantity: string }>;
   /** Validity-range upper bound as POSIX ms; core converts to a slot. */
   validityEndMs?: number;
+  /** CBOR hex; inline datum on the recipient output, written byte for byte. */
+  outputDatumCbor?: string;
+  /** Raise `lovelaceAmount` to the recipient output's min-ADA. */
+  ensureMinAda?: boolean;
 }
 
 /** Subset of core's `TxBuildResult` that x402 consumes. */

@@ -56,7 +56,13 @@ function extractOutputs(outputs: ParsedTxOutput[]): DecodedOutput[] {
         quantity:     a.quantity,
       };
     });
-    return { outputIndex: i, address: o.address, lovelace: o.lovelace, assets };
+    return {
+      outputIndex:    i,
+      address:        o.address,
+      lovelace:       o.lovelace,
+      assets,
+      inlineDatumHex: o.inlineDatumHex ?? null,
+    };
   });
 }
 

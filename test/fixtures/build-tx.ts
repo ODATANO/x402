@@ -23,6 +23,7 @@ import {
   VKeyWitness,
   Signature,
   signEd25519_sync,
+  dataFromCbor,
 } from '@harmoniclabs/buildooor';
 
 export interface TestInput {
@@ -40,6 +41,8 @@ export interface TestOutput {
   address: string;      // bech32
   lovelace: string;     // raw units
   assets?: TestAsset[];
+  /** CBOR hex; attached as inline datum. */
+  inlineDatumHex?: string;
 }
 
 export interface BuildTxArgs {
@@ -72,6 +75,7 @@ export function buildBody(args: BuildTxArgs): TxBody {
   const outputs = args.outputs.map(o => new TxOut({
     address: Address.fromString(o.address),
     value: buildValue(o.lovelace, o.assets),
+    ...(o.inlineDatumHex ? { datum: dataFromCbor(o.inlineDatumHex) } : {}),
   }));
 
   return new TxBody({

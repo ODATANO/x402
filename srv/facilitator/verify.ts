@@ -30,13 +30,31 @@ import { resolvePayerAddress } from './payer';
 import { settle, type SettleArgs } from './settle';
 import * as bridge from '../bridge';
 import type {
+  DecodedPayment,
   PaymentClaim,
+  PaymentRequirementEntry,
   PaymentRequirementsBody,
 } from '../core/types';
 
 const log = cds.log('x402');
 
 export type ProcessKind = 'accepted' | 'rejected' | 'pending';
+
+export interface TransferCheckContext {
+  decoded: DecodedPayment;
+  /** The `accepts[]` entry the payment was matched to. */
+  requirement: PaymentRequirementEntry;
+}
+
+export type TransferCheckResult = { ok: true } | { ok: false; reason: string };
+
+/**
+ * Resource-server check on the payment tx, e.g. the inline datum of a
+ * `script` lock. The middlewares run it through `checkTransfer` before
+ * the facilitator. A rejection answers 402 `transfer_rejected`; a throw
+ * surfaces as a middleware failure.
+ */
+export type VerifyTransfer = (ctx: TransferCheckContext) => TransferCheckResult | Promise<TransferCheckResult>;
 
 export interface ProcessArgs {
   /** Raw header value (undefined if missing). */
@@ -128,35 +146,34 @@ async function runOnAccepted(
   }
 }
 
-export async function process(args: ProcessArgs): Promise<ProcessResult> {
+function rejected(args: DecodeArgs, code: X402Code, reason: string): ProcessResult {
+  return { kind: 'rejected', code, reason, requirementsBody: args.requirementsBody };
+}
+
+type DecodeArgs = Pick<ProcessArgs, 'paymentHeader' | 'requirementsBody'>;
+
+/** Steps shared by `process` and `checkTransfer`: decode and pick the paid entry. */
+function decodeAndPick(
+  args: DecodeArgs,
+): { ok: true; decoded: DecodedPayment; requirements: PaymentRequirementEntry } | { ok: false; result: ProcessResult } {
   const headerStr = Array.isArray(args.paymentHeader)
     ? args.paymentHeader[0]
     : args.paymentHeader;
 
   if (!headerStr) {
-    return {
-      kind: 'rejected',
-      code: Codes.MISSING_HEADER,
-      reason: 'PAYMENT-SIGNATURE header is required',
-      requirementsBody: args.requirementsBody,
-    };
+    return { ok: false, result: rejected(args, Codes.MISSING_HEADER, 'PAYMENT-SIGNATURE header is required') };
   }
 
   // ─── 1. Decode ──────────────────────────────────────────────────────
   // Decode happens BEFORE we pick a requirements entry, the picker needs
   // to know which (payTo, asset) the tx actually credits to choose
   // among multi-accept options.
-  let decoded;
+  let decoded: DecodedPayment;
   try {
     decoded = decode(headerStr);
   } catch (err) {
     if (err instanceof X402Error) {
-      return {
-        kind: 'rejected',
-        code: err.code as X402Code,
-        reason: err.message,
-        requirementsBody: args.requirementsBody,
-      };
+      return { ok: false, result: rejected(args, err.code as X402Code, err.message) };
     }
     throw err;
   }
@@ -166,14 +183,28 @@ export async function process(args: ProcessArgs): Promise<ProcessResult> {
   // multi-accept it routes the tx to the matching seller option.
   const picked = pickRequirement(decoded, args.requirementsBody);
   if (!picked.ok) {
-    return {
-      kind: 'rejected',
-      code: picked.code,
-      reason: picked.reason,
-      requirementsBody: args.requirementsBody,
-    };
+    return { ok: false, result: rejected(args, picked.code, picked.reason) };
   }
-  const requirements = picked.entry;
+  return { ok: true, decoded, requirements: picked.entry };
+}
+
+/**
+ * Decode, pick the paid entry and run `verifyTransfer`, without chain
+ * calls. Returns the rejection, or null when the facilitator may go on.
+ */
+export async function checkTransfer(
+  args: DecodeArgs & { verifyTransfer: VerifyTransfer },
+): Promise<ProcessResult | null> {
+  const dp = decodeAndPick(args);
+  if (!dp.ok) return dp.result;
+  const r = await args.verifyTransfer({ decoded: dp.decoded, requirement: dp.requirements });
+  return r.ok ? null : rejected(args, Codes.TRANSFER_REJECTED, r.reason);
+}
+
+export async function process(args: ProcessArgs): Promise<ProcessResult> {
+  const dp = decodeAndPick(args);
+  if (!dp.ok) return dp.result;
+  const { decoded, requirements } = dp;
 
   // ─── 2. Validate (6 checks, pure) ───────────────────────────────────
   let currentSlot: number;

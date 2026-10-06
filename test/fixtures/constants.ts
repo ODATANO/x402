@@ -49,6 +49,11 @@ function enterpriseBech32(vkhHex: string): string {
 export const BUYER_ADDR  = enterpriseBech32(BUYER_VKH);
 export const SELLER_ADDR = enterpriseBech32(SELLER_VKH);
 
+// Enterprise script address for `assetTransferMethod: 'script'` tests.
+export const SCRIPT_HASH = '5c'.repeat(28);
+export const SCRIPT_ADDR = Address.testnet(Credential.script(SCRIPT_HASH)).toString();
+export const OTHER_SCRIPT_HASH = '6d'.repeat(28);
+
 // ─── Synthetic native asset ──────────────────────────────────────────
 export const TEST_POLICY_ID    = 'a0'.repeat(28);   // 56 hex chars
 export const TEST_ASSET_NAME   = '4245454631';      // "BEEF1" in hex

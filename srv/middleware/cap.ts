@@ -30,6 +30,7 @@ import { buildPaymentRequirementsMulti } from '../core/requirements';
 import { localFacilitator, type Facilitator } from '../facilitator/adapter';
 import { Codes } from '../core/errors';
 import { resolvePrice } from './pricing';
+import { checkTransfer, type VerifyTransfer } from '../facilitator/verify';
 import { persistReceipt, resolveReceiptsEntity } from './receipts';
 import {
   issueGrant,
@@ -38,9 +39,9 @@ import {
   resolveGrantTtl,
 } from './grants';
 import type {
-  AssetTransferMethod,
   Network,
   PaymentClaim,
+  PaymentExtra,
   PriceSpec,
   PriceResolver,
   PricingContext,
@@ -66,9 +67,8 @@ export interface X402CapOptions {
   routePricing?: Record<string, PriceSpec> | PriceResolver;
   description?: string;
   mimeType?: string;
-  assetTransferMethod?: AssetTransferMethod;
   maxTimeoutSeconds?: number;
-  extra?: Record<string, unknown>;
+  extra?: PaymentExtra;
   settlePollBudgetMs?: number;
   allowNoTtl?: boolean;
   /**
@@ -77,6 +77,8 @@ export interface X402CapOptions {
    */
   pendingGraceMs?: number;
   onAccepted?: (claim: PaymentClaim, req: cds.Request) => void | Promise<void>;
+  /** Resource-server check on the payment tx before submit. See `VerifyTransfer`. */
+  verifyTransfer?: VerifyTransfer;
   /**
    * Optional resource URL builder. Defaults to the request's HTTP URL
    * when available, falling back to `cap://<event>`. Pass a custom
@@ -255,7 +257,6 @@ export function gateService<S extends cds.Service>(srv: S, opts: X402CapOptions)
         description: opts.description ?? '',
         mimeType:    opts.mimeType ?? 'application/json',
       },
-      ...(opts.assetTransferMethod ? { assetTransferMethod: opts.assetTransferMethod } : {}),
       ...(opts.maxTimeoutSeconds !== undefined ? { maxTimeoutSeconds: opts.maxTimeoutSeconds } : {}),
       ...(opts.extra ? { extra: opts.extra } : {}),
       withMissingHeaderError: true,
@@ -292,7 +293,10 @@ export function gateService<S extends cds.Service>(srv: S, opts: X402CapOptions)
     //     would translate the 402 into a 500. ─────────────────────────
     let result: Awaited<ReturnType<Facilitator['verifyAndSettle']>>;
     try {
-      result = await facilitator.verifyAndSettle(processArgs);
+      const transferRejection = opts.verifyTransfer
+        ? await checkTransfer({ paymentHeader: headerVal, requirementsBody, verifyTransfer: opts.verifyTransfer })
+        : null;
+      result = transferRejection ?? await facilitator.verifyAndSettle(processArgs);
     } catch (err) {
       log.error('x402 CAP gate internal error', err);
       // `reject` throws; we DO NOT wrap this in another try/catch.

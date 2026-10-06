@@ -31,7 +31,7 @@ export interface PayHandlerResult {
   nonceRef: string;
 }
 
-/** Pick which `accepts[]` entry to satisfy. Default picks the first. */
+/** Pick which `accepts[]` entry to satisfy. Default: first entry with a supported transfer method. */
 export type AcceptsSelector = (
   accepts: PaymentRequirementEntry[],
 ) => PaymentRequirementEntry | undefined;
@@ -41,7 +41,8 @@ export interface X402ClientOptions {
   pay: PayHandler;
   /**
    * Optional, choose one of the `accepts[]` entries when the server
-   * offers multiple. Defaults to `accepts[0]`.
+   * offers multiple. Defaults to the first entry whose
+   * `extra.assetTransferMethod` is `default` or `script`.
    */
   selectAccepts?: AcceptsSelector;
   /**

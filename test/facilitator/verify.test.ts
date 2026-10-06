@@ -10,14 +10,14 @@ import { bridgeFactory } from '../fixtures/mock-bridge';
 jest.mock('../../srv/bridge', () => bridgeFactory());
 
 import * as bridge from '../../srv/bridge';
-import { process as verifyPayment } from '../../srv/facilitator/verify';
+import { process as verifyPayment, checkTransfer } from '../../srv/facilitator/verify';
 import {
   buildPaymentRequirements,
   buildPaymentRequirementsMulti,
 } from '../../srv/core/requirements';
 import { Codes } from '../../srv/core/errors';
 import {
-  BUYER_PRIV, SELLER_ADDR,
+  BUYER_PRIV, BUYER_ADDR, SELLER_ADDR,
   NONCE_TX_HASH, NONCE_INDEX, NONCE_REF,
   CURRENT_SLOT, FUTURE_SLOT,
   NETWORK_PREPROD,
@@ -402,5 +402,45 @@ describe('verifyPayment, pending-retry fallback (spent nonce, own tx on chain)',
     if (r.kind === 'rejected') expect(r.code).toBe(Codes.REPLAY);
     // Disabled means no chain lookup for the fallback either.
     expect(mockedBridge.getTransactionByHash).not.toHaveBeenCalled();
+  });
+});
+
+describe('checkTransfer', () => {
+  it('hands the decoded tx and the paid entry to the hook', async () => {
+    const verifyTransfer = jest.fn().mockResolvedValue({ ok: true });
+    const r = await checkTransfer({ paymentHeader: happyEnvelope(), requirementsBody: requirementsBody(), verifyTransfer });
+    expect(r).toBeNull();
+    const ctx = verifyTransfer.mock.calls[0]![0];
+    expect(ctx.requirement.payTo).toBe(SELLER_ADDR);
+    expect(ctx.decoded.outputs[0].address).toBe(SELLER_ADDR);
+    expect(mockedBridge.submitTransaction).not.toHaveBeenCalled();
+    expect(mockedBridge.isUtxoUnspent).not.toHaveBeenCalled();
+  });
+
+  it('turns a hook rejection into transfer_rejected', async () => {
+    const r = await checkTransfer({
+      paymentHeader: happyEnvelope(),
+      requirementsBody: requirementsBody(),
+      verifyTransfer: () => ({ ok: false, reason: 'datum does not name this order' }),
+    });
+    expect(r).toMatchObject({ kind: 'rejected', code: Codes.TRANSFER_REJECTED, reason: 'datum does not name this order' });
+  });
+
+  it('rejects a missing header without calling the hook', async () => {
+    const verifyTransfer = jest.fn();
+    const r = await checkTransfer({ paymentHeader: undefined, requirementsBody: requirementsBody(), verifyTransfer });
+    expect(r).toMatchObject({ kind: 'rejected', code: Codes.MISSING_HEADER });
+    expect(verifyTransfer).not.toHaveBeenCalled();
+  });
+
+  it('rejects a payment no accepts[] entry matches without calling the hook', async () => {
+    const verifyTransfer = jest.fn();
+    const body = buildPaymentRequirementsMulti({
+      options: [{ amount: '1000000' }, { amount: '5', asset: USDM_PREPROD_ASSET }],
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace', resource: '/r',
+    });
+    const r = await checkTransfer({ paymentHeader: happyEnvelope({ outputAddr: BUYER_ADDR }), requirementsBody: body, verifyTransfer });
+    expect(r).toMatchObject({ kind: 'rejected', code: Codes.WRONG_ASSET });
+    expect(verifyTransfer).not.toHaveBeenCalled();
   });
 });

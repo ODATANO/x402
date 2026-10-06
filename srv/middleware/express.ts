@@ -23,9 +23,10 @@ import { buildPaymentRequirementsMulti } from '../core/requirements';
 import { localFacilitator, type Facilitator } from '../facilitator/adapter';
 import { Codes } from '../core/errors';
 import { resolvePrice } from './pricing';
+import { checkTransfer, type VerifyTransfer } from '../facilitator/verify';
 import type {
-  AssetTransferMethod,
   PaymentClaim,
+  PaymentExtra,
   Network,
   PriceSpec,
   PriceResolver,
@@ -69,12 +70,10 @@ export interface X402MiddlewareOptions {
   description?: string;
   /** Override default `accepts[0].resource.mimeType` ('application/json'). */
   mimeType?: string;
-  /** v2 `assetTransferMethod`. Default 'default'. */
-  assetTransferMethod?: AssetTransferMethod;
   /** Buyer-side timeout hint. Default 600. */
   maxTimeoutSeconds?: number;
-  /** Free-form extras (decimals, fingerprint, UI hints). */
-  extra?: Record<string, unknown>;
+  /** Transfer method plus free-form extras (decimals, fingerprint, UI hints). */
+  extra?: PaymentExtra;
   /** Settle poll budget (ms). Default 60_000. */
   settlePollBudgetMs?: number;
   /** If true, accept tx with no TTL set. Default false (spec-strict). */
@@ -90,6 +89,8 @@ export interface X402MiddlewareOptions {
    * block serving the response.
    */
   onAccepted?: (claim: PaymentClaim, req: Request) => void | Promise<void>;
+  /** Resource-server check on the payment tx before submit. See `VerifyTransfer`. */
+  verifyTransfer?: VerifyTransfer;
   /**
    * Facilitator implementation handling verify+settle. Default
    * `localFacilitator()`, runs the pipeline in-process via
@@ -140,7 +141,6 @@ export function x402Middleware(opts: X402MiddlewareOptions): RequestHandler {
           description: opts.description ?? '',
           mimeType:    opts.mimeType ?? 'application/json',
         },
-        ...(opts.assetTransferMethod ? { assetTransferMethod: opts.assetTransferMethod } : {}),
         ...(opts.maxTimeoutSeconds !== undefined ? { maxTimeoutSeconds: opts.maxTimeoutSeconds } : {}),
         ...(opts.extra ? { extra: opts.extra } : {}),
         withMissingHeaderError: true,
@@ -162,7 +162,10 @@ export function x402Middleware(opts: X402MiddlewareOptions): RequestHandler {
         processArgs.onAccepted = (claim) => opts.onAccepted!(claim, req);
       }
 
-      const result = await facilitator.verifyAndSettle(processArgs);
+      const transferRejection = opts.verifyTransfer
+        ? await checkTransfer({ paymentHeader: headerVal, requirementsBody, verifyTransfer: opts.verifyTransfer })
+        : null;
+      const result = transferRejection ?? await facilitator.verifyAndSettle(processArgs);
 
       if (result.kind === 'accepted') {
         res.setHeader('X-PAYMENT-RESPONSE', result.paymentResponseB64);

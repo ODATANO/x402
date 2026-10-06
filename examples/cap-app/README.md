@@ -67,7 +67,6 @@ The 402 response body looks like:
       "description": "Example: synthetic price feed",
       "mimeType": "application/json"
     },
-    "assetTransferMethod": "default",
     "maxTimeoutSeconds": 600
   }]
 }

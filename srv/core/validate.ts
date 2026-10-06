@@ -13,6 +13,9 @@
  *      - 5b. that UTxO is still unspent on chain  ← chain-touching, lives in `nonce.ts`
  *   6. TTL / expiry                    , tx.validity_range.upper_bound in future
  *
+ * For `assetTransferMethod: 'script'` it also binds `payTo` to the declared
+ * script (see `transfer.ts`). Other methods are rejected.
+ *
  * This module covers (1), (2), (3), (4), (5a) and (6). The chain-touching
  * part of (5), checking the UTxO is unspent, and (5b) live in
  * `facilitator/nonce.ts` and run after this. We also keep a sanity guard
@@ -25,6 +28,8 @@
 import { Codes, type X402Code } from './errors';
 import { networksMatch } from './network';
 import { parseAsset } from './asset';
+import { verifyScriptTransfer } from './transfer';
+import { isScriptExtra, isSupportedTransferMethod, transferMethodOf } from './transfer-method';
 import type {
   DecodedPayment,
   DecodedOutput,
@@ -102,6 +107,15 @@ export function validatePayment(
     };
   }
 
+  const method = transferMethodOf(requirements);
+  if (!isSupportedTransferMethod(method)) {
+    return {
+      ok: false,
+      code: Codes.UNSUPPORTED_METHOD,
+      reason: `assetTransferMethod '${method}' is not supported`,
+    };
+  }
+
   // Parse the asset string once, also normalises the requirement's
   // unit key for output comparison.
   const parsed = parseAsset(requirements.asset);
@@ -119,6 +133,13 @@ export function validatePayment(
       code: Codes.WRONG_RECIPIENT,
       reason: `no output to payTo address ${requirements.payTo}`,
     };
+  }
+
+  // ─── Script transfer: payTo is the declared script ─────────────────
+  let scriptResult: ReturnType<typeof verifyScriptTransfer> | undefined;
+  if (isScriptExtra(requirements.extra)) {
+    scriptResult = verifyScriptTransfer(decoded, requirements, requirements.extra);
+    if (!scriptResult.ok) return scriptResult;
   }
 
   // ─── Check 4: asset (run before amount so amount=0 reports as
@@ -190,6 +211,7 @@ export function validatePayment(
       payTo:       requirements.payTo,
       resourceUrl: requirements.resource.url,
       nonceRef:    `${decoded.nonce.txHash}#${decoded.nonce.index}`,
+      ...(scriptResult?.ok ? { extra: scriptResult.claimExtra } : {}),
     },
   };
 }

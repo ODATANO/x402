@@ -43,6 +43,12 @@ export const Codes = Object.freeze({
   NONCE_NOT_REFERENCED:  'nonce_not_referenced',     // check 5, UTxO not in tx inputs
   EXPIRED_TTL:           'expired_ttl',              // check 6, validity range upper bound passed
 
+  // ---- script transfer ----
+  SCRIPT_ADDRESS_MISMATCH: 'script_address_mismatch', // payTo is not the declared script's address
+  DATUM_MISSING:         'datum_missing',            // extra.datum set, no payTo output carries an inline datum
+  DATUM_MISMATCH:        'datum_mismatch',           // payTo outputs carry a datum, none equals extra.datum
+  TRANSFER_REJECTED:     'transfer_rejected',        // verifyTransfer hook said no
+
   // ---- supporting ----
   UNSIGNED_TRANSACTION:  'unsigned_transaction',     // sanity: no vkey witnesses
 

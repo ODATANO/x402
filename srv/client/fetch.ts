@@ -19,7 +19,8 @@
 import { encodePaymentEnvelope } from './envelope';
 import { X402PaymentError, paymentErrorFromBody } from './errors';
 import type { X402ClientOptions } from './types';
-import type { PaymentRequirementsBody, PaymentRequirementEntry } from '../core/types';
+import type { PaymentRequirementsBody } from '../core/types';
+import { selectFirstSupported } from './select';
 
 type FetchFn = typeof globalThis.fetch;
 
@@ -44,8 +45,7 @@ export function x402Fetch(opts: X402FetchOptions): FetchFn {
   const maxRetries     = opts.maxRetries ?? 1;
   const pendingRetries = opts.pendingRetries ?? 5;
   const pendingDelayMs = opts.pendingRetryDelayMs ?? 2_000;
-  const selectFirst    = (a: PaymentRequirementEntry[]) => a[0];
-  const select         = opts.selectAccepts ?? selectFirst;
+  const select         = opts.selectAccepts ?? selectFirstSupported;
 
   return async function paidFetch(input, init) {
     let attemptsLeft = maxRetries;

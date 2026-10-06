@@ -28,9 +28,8 @@ import * as bridge from '../bridge';
 import type { PaymentRequirementEntry } from '../core/types';
 import { parseAsset } from '../core/asset';
 import { parsePaymentAddress } from './address';
-
-/** ADA (lovelace) attached to a native-asset output to satisfy min-ADA. */
-const TOKEN_OUTPUT_LOVELACE = 2_000_000n;
+import { isScriptExtra } from '../core/transfer-method';
+import { transferExtraProblem } from '../core/transfer';
 
 /** Cardano networks run 1-second slots, so TTL slots ≈ TTL seconds. */
 const SLOT_MS = 1000;
@@ -66,33 +65,33 @@ export async function buildUnsignedPaymentTx(
   args: BuildUnsignedTxArgs,
 ): Promise<UnsignedTxResult> {
   const { buyerBech32, requirements } = args;
-
   // 1. Validate the buyer address shape and derive the required signer.
   //    Throws for bad bech32 / script-cred / non-payment addresses.
   const { paymentKeyHashHex } = parsePaymentAddress(buyerBech32);
 
-  // 2. Translate the v2 requirement into a core transfer request.
+  // A script entry is checked like the facilitator will, so the buyer
+  // never locks funds at an address that does not match the declared script.
+  const transferProblem = transferExtraProblem(requirements.extra, requirements.payTo);
+  if (transferProblem) throw new Error(`buildUnsignedPaymentTx: ${transferProblem}`);
+  const datum = isScriptExtra(requirements.extra) ? requirements.extra.datum : undefined;
+
+  // 2. Translate the v2 requirement into a core transfer request. Core
+  //    raises the output to its min-ADA, which grows with the datum.
   const parsedAsset = parseAsset(requirements.asset);
   const required = BigInt(requirements.amount);
   const validityEndMs = Date.now() + (args.ttlSlotsFromNow ?? 1800) * SLOT_MS;
 
-  const req: bridge.CoreTransferReq = parsedAsset.isLovelace
-    ? {
-        senderAddress:    buyerBech32,
-        recipientAddress: requirements.payTo,
-        changeAddress:    buyerBech32,
-        lovelaceAmount:   required.toString(),
-        validityEndMs,
-      }
-    : {
-        senderAddress:    buyerBech32,
-        recipientAddress: requirements.payTo,
-        changeAddress:    buyerBech32,
-        // Native-asset output rides a fixed min-ADA; change reconciles the rest.
-        lovelaceAmount:   TOKEN_OUTPUT_LOVELACE.toString(),
-        assets:           [{ unit: parsedAsset.unit, quantity: required.toString() }],
-        validityEndMs,
-      };
+  const req: bridge.CoreTransferReq = {
+    senderAddress:    buyerBech32,
+    recipientAddress: requirements.payTo,
+    changeAddress:    buyerBech32,
+    ...(parsedAsset.isLovelace
+      ? { lovelaceAmount: required.toString() }
+      : { lovelaceAmount: '0', assets: [{ unit: parsedAsset.unit, quantity: required.toString() }] }),
+    validityEndMs,
+    ensureMinAda:     true,
+    ...(datum !== undefined ? { outputDatumCbor: datum } : {}),
+  };
 
   // 3. Delegate the build (UTxO fetch + coin selection + change + fee).
   const result = await bridge.buildUnsignedTransfer(req);

@@ -21,8 +21,9 @@ jest.mock('../../srv/bridge', () => bridgeFactory());
 import * as bridge from '../../srv/bridge';
 import { buildUnsignedPaymentTx } from '../../srv/helpers/build-unsigned-tx';
 import { buildEntry } from '../../srv/core/requirements';
+import type { PaymentExtra, ScriptTransferExtra } from '../../srv/core/types';
 import {
-  BUYER_ADDR, BUYER_VKH, SELLER_ADDR,
+  BUYER_ADDR, BUYER_VKH, SELLER_ADDR, SCRIPT_ADDR, SCRIPT_HASH,
   NETWORK_PREPROD,
   TEST_ASSET_STRING, TEST_ASSET_UNIT,
   CURRENT_SLOT,
@@ -115,6 +116,45 @@ describe('buildUnsignedPaymentTx, address validation', () => {
   });
 });
 
+describe('buildUnsignedPaymentTx, script transfer', () => {
+  const scriptRequirements = (extra: Partial<ScriptTransferExtra>, payTo = SCRIPT_ADDR) => ({
+    ...lovelaceRequirements(),
+    payTo,
+    extra: { assetTransferMethod: 'script' as const, scriptHash: SCRIPT_HASH, ...extra },
+  });
+
+  it('locks at the script with the datum written byte for byte', async () => {
+    mockedBridge.buildUnsignedTransfer.mockResolvedValue(
+      coreResult({ inputs: [{ txHash: 'a'.repeat(64), index: 0, lovelace: '10000000' }] }),
+    );
+    mockedBridge.parseTransaction.mockReturnValue(
+      parsed({ inputs: [{ txHash: 'a'.repeat(64), outputIndex: 0 }], validityEnd: null }),
+    );
+
+    await buildUnsignedPaymentTx({ buyerBech32: BUYER_ADDR, requirements: scriptRequirements({ datum: 'd87981182a' }) });
+
+    const req = mockedBridge.buildUnsignedTransfer.mock.calls[0]![0];
+    expect(req.recipientAddress).toBe(SCRIPT_ADDR);
+    expect(req.outputDatumCbor).toBe('d87981182a');
+    expect(req.ensureMinAda).toBe(true);
+  });
+
+  it('refuses a payTo that is not the declared script', async () => {
+    await expect(buildUnsignedPaymentTx({
+      buyerBech32: BUYER_ADDR,
+      requirements: scriptRequirements({}, SELLER_ADDR),
+    })).rejects.toThrow(/payTo must be a script address/);
+    expect(mockedBridge.buildUnsignedTransfer).not.toHaveBeenCalled();
+  });
+
+  it('refuses unsupported transfer methods', async () => {
+    await expect(buildUnsignedPaymentTx({
+      buyerBech32: BUYER_ADDR,
+      requirements: { ...lovelaceRequirements(), extra: { assetTransferMethod: 'masumi' } as unknown as PaymentExtra },
+    })).rejects.toThrow(/'masumi' is not supported/);
+  });
+});
+
 describe('buildUnsignedPaymentTx, lovelace flow', () => {
   it('translates an ADA requirement into a plain-ADA core request', async () => {
     mockedBridge.buildUnsignedTransfer.mockResolvedValue(
@@ -135,6 +175,8 @@ describe('buildUnsignedPaymentTx, lovelace flow', () => {
     expect(req.changeAddress).toBe(BUYER_ADDR);
     expect(req.lovelaceAmount).toBe('2000000');
     expect(req.assets).toBeUndefined();
+    expect(req.ensureMinAda).toBe(true);
+    expect(req.outputDatumCbor).toBeUndefined();
     expect(typeof req.validityEndMs).toBe('number');
 
     expect(r.unsignedTxCborHex).toBe('aa'.repeat(80));
@@ -170,7 +212,7 @@ describe('buildUnsignedPaymentTx, lovelace flow', () => {
 });
 
 describe('buildUnsignedPaymentTx, native asset flow', () => {
-  it('translates a token requirement into a multi-asset core request with riding min-ADA', async () => {
+  it('translates a token requirement into a multi-asset core request; core adds the min-ADA', async () => {
     mockedBridge.buildUnsignedTransfer.mockResolvedValue(
       coreResult({ inputs: [{ txHash: 'c'.repeat(64), index: 3, lovelace: '8000000' }] }),
     );
@@ -184,7 +226,8 @@ describe('buildUnsignedPaymentTx, native asset flow', () => {
     });
 
     const req = mockedBridge.buildUnsignedTransfer.mock.calls[0]![0];
-    expect(req.lovelaceAmount).toBe('2000000');              // TOKEN_OUTPUT_LOVELACE
+    expect(req.lovelaceAmount).toBe('0');
+    expect(req.ensureMinAda).toBe(true);
     expect(req.assets).toEqual([{ unit: TEST_ASSET_UNIT, quantity: '10' }]);
     expect(r.nonceRef).toBe(`${'c'.repeat(64)}#3`);
   });

@@ -31,36 +31,52 @@ export interface ParsedPaymentAddress {
   paymentKeyHashHex: string;
 }
 
+export interface PaymentCredential {
+  kind: 'key' | 'script';
+  /** Lowercase hex, 56 chars. */
+  hashHex: string;
+}
+
+/** Address bytes with at least header + 28-byte credential, or null. */
+function addressBytes(bech32Addr: string): Uint8Array | null {
+  try {
+    const bytes = Uint8Array.from(bech32.fromWords(bech32.decode(bech32Addr, BECH32_LIMIT).words));
+    return bytes.length >= 29 ? bytes : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Payment credential of a Base or Enterprise address. Returns null for
+ * malformed bech32 and for addresses without one (pointer, reward, Byron).
+ */
+export function paymentCredentialOf(bech32Addr: string): PaymentCredential | null {
+  const bytes = addressBytes(bech32Addr);
+  if (!bytes) return null;
+  const addrType = bytes[0]! >> 4;
+  const hashHex = Buffer.from(bytes.slice(1, 29)).toString('hex');
+  if (PAYMENT_KEY_HASH_TYPES.has(addrType)) return { kind: 'key', hashHex };
+  if (SCRIPT_PAYMENT_TYPES.has(addrType))   return { kind: 'script', hashHex };
+  return null;
+}
+
 /**
  * Decode a bech32 Cardano address and extract its payment-credential
- * VKey hash. Throws (with the same messages the old CSL path used) for
- * malformed bech32, script-cred payment, or non-payment (reward/pointer)
- * addresses.
+ * VKey hash. Throws for malformed bech32, script-cred payment, or
+ * non-payment (reward/pointer) addresses.
  */
 export function parsePaymentAddress(bech32Addr: string): ParsedPaymentAddress {
-  let bytes: Uint8Array;
-  try {
-    const decoded = bech32.decode(bech32Addr, BECH32_LIMIT);
-    bytes = Uint8Array.from(bech32.fromWords(decoded.words));
-  } catch {
+  if (!addressBytes(bech32Addr)) {
     throw new Error(`buildUnsignedPaymentTx: invalid bech32 address: ${bech32Addr}`);
   }
-
-  // header (1 byte) + 28-byte payment credential.
-  if (bytes.length < 29) {
-    throw new Error(`buildUnsignedPaymentTx: invalid bech32 address: ${bech32Addr}`);
-  }
-
-  const addrType = bytes[0]! >> 4;
-
-  if (SCRIPT_PAYMENT_TYPES.has(addrType)) {
+  const cred = paymentCredentialOf(bech32Addr);
+  if (cred?.kind === 'script') {
     throw new Error('buildUnsignedPaymentTx: payment credential must be a VKey hash, not a script');
   }
-  if (!PAYMENT_KEY_HASH_TYPES.has(addrType)) {
+  if (!cred) {
     // pointer (4,5), reward/stake (14,15), Byron-via-bech32, etc.
     throw new Error('buildUnsignedPaymentTx: only Base / Enterprise addresses are supported');
   }
-
-  const keyHash = bytes.slice(1, 29);
-  return { paymentKeyHashHex: Buffer.from(keyHash).toString('hex') };
+  return { paymentKeyHashHex: cred.hashHex };
 }

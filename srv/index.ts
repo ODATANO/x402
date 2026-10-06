@@ -44,6 +44,11 @@ export {
 
 export { decode } from './core/decode';
 export { validatePayment, type ValidationResult, type ValidateOptions } from './core/validate';
+export {
+  SUPPORTED_TRANSFER_METHODS,
+  transferMethodOf,
+  isScriptExtra,
+} from './core/transfer-method';
 
 // ─── Asset / network helpers ──────────────────────────────────────────
 export { parseAsset, buildAssetString, type ParsedAsset } from './core/asset';
@@ -55,6 +60,12 @@ export { X402Error, Codes, type X402Code } from './core/errors';
 // ─── Types ────────────────────────────────────────────────────────────
 export type {
   AssetTransferMethod,
+  TransferScript,
+  TransferScriptParameter,
+  DefaultTransferExtra,
+  ScriptTransferExtra,
+  PaymentExtra,
+  ScriptClaimExtra,
   ResourceDescriptor,
   PaymentRequirementEntry,
   PaymentRequirementsBody,
@@ -69,9 +80,13 @@ export type {
 // ─── Facilitator (chain-touching) ─────────────────────────────────────
 export {
   process as verifyPayment,
+  checkTransfer,
   type ProcessArgs,
   type ProcessResult,
   type ProcessKind,
+  type VerifyTransfer,
+  type TransferCheckContext,
+  type TransferCheckResult,
 } from './facilitator/verify';
 export { settle, type SettleArgs, type SettleResult } from './facilitator/settle';
 export { checkNonceUnspent, type NonceCheckArgs, type NonceResult } from './facilitator/nonce';

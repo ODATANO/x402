@@ -4,6 +4,28 @@ All notable changes to `@odatano/x402` are documented here. The format follows [
 
 **Pre-1.0 caveat:** minor versions may include breaking changes until `1.0.0`.
 
+## [0.6.0] - 2026-10-06
+
+### Breaking
+- **`assetTransferMethod` moved into `extra`.** `accepts[].assetTransferMethod` is now `accepts[].extra.assetTransferMethod`, absent means `default`, as in the Cardano `exact` spec. The `assetTransferMethod` option is gone from `x402Middleware`, `gateService`, `buildEntry`, `buildPaymentRequirementsMulti` and `RouteOption`; set it in `extra`. `extra` is typed as `PaymentExtra`.
+- **Requires `@odatano/core` >= 2.0.0-rc.30** (`outputDatumCbor`, `ensureMinAda`, `applyScriptParameters`, `plutusScriptHash`). Peer range was `>=1.9.1 || >=2.0.0-0`.
+
+### Added
+- **`assetTransferMethod: 'script'`.** The payment locks funds at a script address, with an optional inline datum from `extra.datum` (CBOR hex). The script is named by `extra.scriptHash` or by `extra.script` (Plutus V2/V3) plus `extra.parameters` (`bytes`, `string`, `integer`/`bigint`, `boolean`), hashed through `@odatano/core`. The facilitator checks that `payTo` is that script's address (`script_address_mismatch`) and that the lock carries `extra.datum`, compared as PlutusData (`datum_missing`, `datum_mismatch`). `buildEntry` rejects a misconfigured `script` extra. The accepted claim carries `extra.lockRefs`. `localFacilitator().supported()` reports `['default', 'script']`.
+- **`buildUnsignedPaymentTx` builds script locks**: checks the entry like the facilitator, writes `extra.datum` byte for byte as the inline datum (`outputDatumCbor`).
+- **`verifyTransfer` option** on `x402Middleware` and `gateService`: own check on the decoded payment tx before the facilitator runs, e.g. the content of the inline datum. Rejection answers `402 transfer_rejected`. Exported as `checkTransfer` for direct use.
+- **`DecodedOutput.inlineDatumHex`**.
+
+### Changed
+- **Unknown transfer methods are rejected.** The facilitator answers `unsupported_transfer_method` for any method other than `default` and `script`, instead of verifying it as a plain transfer.
+- **Client default selection.** `x402Fetch` and `x402Axios` pick the first `accepts[]` entry with a supported method instead of `accepts[0]`.
+- **Min-ADA comes from `@odatano/core`.** `buildUnsignedPaymentTx` passes `ensureMinAda` instead of riding a fixed 2 ADA on native-asset outputs; a lovelace price below min-UTxO is raised to it.
+- **New dependency `@harmoniclabs/plutus-data`** to compare datums as PlutusData.
+
+### Internal
+- Script hashes for `script` plus `parameters` are pinned against reference values from the Evolution SDK path of `@x402/cardano` (`test/core/script-hash.test.ts`).
+- Examples on `@odatano/core` 2.0.0-rc.30.
+
 ## [0.5.2] - 2026-09-19
 
 ### Added

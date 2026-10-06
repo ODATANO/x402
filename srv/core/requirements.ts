@@ -6,24 +6,24 @@
  * a resource descriptor. There is NO USDM default and no decimals
  * assumption, both belong to the consumer's product config.
  *
- * The v2 shape diverges from v1 in five places (see `docs/spec-v2-summary.md`
- * once written):
+ * The v2 shape diverges from v1 in five places:
  *   1. `x402Version: 2`               (was 1)
  *   2. `accepts[].amount`             (was `maxAmountRequired`)
  *   3. `accepts[].asset` is a single  (was split: `asset` + `extra.assetNameHex`)
  *      string `<policy>.<nameHex>` or `'lovelace'`
  *   4. `accepts[].resource` is an     (was a string)
  *      object `{ url, description, mimeType }`
- *   5. `accepts[].assetTransferMethod`(new field)
+ *   5. `accepts[].extra.assetTransferMethod` (new field, absent = 'default')
  */
 
 import { parseNetwork, type Network } from './network';
 import { parseAsset } from './asset';
+import { transferExtraProblem } from './transfer';
 import type {
+  PaymentExtra,
   PaymentRequirementEntry,
   PaymentRequirementsBody,
   ResourceDescriptor,
-  AssetTransferMethod,
   RouteOption,
 } from './types';
 
@@ -37,10 +37,9 @@ export interface BuildPaymentRequirementsArgs {
   description?: string;             // overrides resource.description when resource is a string
   mimeType?: string;                // overrides resource.mimeType when resource is a string
   outputSchema?: unknown;
-  assetTransferMethod?: AssetTransferMethod; // default: 'default'
   maxTimeoutSeconds?: number;       // default: 600
-  /** Free-form extras (decimals, fingerprint, UI hints). */
-  extra?: Record<string, unknown>;
+  /** Transfer method plus free-form extras (decimals, fingerprint, UI hints). */
+  extra?: PaymentExtra;
   /**
    * If true, prepend the standard 'PAYMENT-SIGNATURE header is required'
    * error string. Used for the missing-header path; omit for downstream
@@ -87,6 +86,8 @@ export function buildEntry(args: BuildPaymentRequirementsArgs): PaymentRequireme
   if (!/^\d+$/.test(amount) || amount === '0') {
     throw new Error(`buildEntry: amount must be a positive integer (got '${amount}')`);
   }
+  const transferProblem = transferExtraProblem(args.extra, args.payTo);
+  if (transferProblem) throw new Error(`buildEntry: ${transferProblem}`);
 
   const resource = normalizeResource(args.resource, args.description, args.mimeType, args.outputSchema);
 
@@ -97,7 +98,6 @@ export function buildEntry(args: BuildPaymentRequirementsArgs): PaymentRequireme
     amount,
     payTo:                args.payTo,
     resource,
-    assetTransferMethod:  args.assetTransferMethod ?? 'default',
     maxTimeoutSeconds:    args.maxTimeoutSeconds ?? 600,
     ...(args.extra ? { extra: args.extra } : {}),
   };
@@ -138,9 +138,8 @@ export interface BuildMultiArgs {
   description?: string;
   mimeType?: string;
   outputSchema?: unknown;
-  assetTransferMethod?: AssetTransferMethod;
   maxTimeoutSeconds?: number;
-  extra?: Record<string, unknown>;
+  extra?: PaymentExtra;
   /** Same as the single-entry builder's flag. See `BuildPaymentRequirementsArgs`. */
   withMissingHeaderError?: boolean;
 }
@@ -175,7 +174,6 @@ export function buildPaymentRequirementsMulti(args: BuildMultiArgs): PaymentRequ
       description:          opt.description ?? args.description,
       mimeType:             opt.mimeType ?? args.mimeType,
       outputSchema:         args.outputSchema,
-      assetTransferMethod:  opt.assetTransferMethod ?? args.assetTransferMethod,
       maxTimeoutSeconds:    opt.maxTimeoutSeconds   ?? args.maxTimeoutSeconds,
       extra:                opt.extra              ?? args.extra,
     });

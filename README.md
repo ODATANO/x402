@@ -9,7 +9,7 @@
 
 [![Tests](https://github.com/ODATANO/x402/actions/workflows/test.yaml/badge.svg)](https://github.com/ODATANO/x402/actions/workflows/test.yaml)
 [![Coverage](https://codecov.io/gh/ODATANO/x402/branch/main/graph/badge.svg)](https://codecov.io/gh/ODATANO/x402)
-[![@odatano/core](https://img.shields.io/badge/@odatano/core-1.9.1-blue)](https://www.npmjs.com/package/@odatano/core)
+[![@odatano/core](https://img.shields.io/badge/@odatano/core-2.0.0--rc.30-blue)](https://www.npmjs.com/package/@odatano/core)
 [![npm](https://img.shields.io/npm/v/@odatano/x402?color=blue&logo=npm)](https://www.npmjs.com/package/@odatano/x402)
 [![npm downloads](https://img.shields.io/npm/dt/@odatano/x402?logo=npm&label=downloads&color=blue)](https://www.npmjs.com/package/@odatano/x402)
 [![License](https://img.shields.io/badge/license-Apache%202.0-yellow)](LICENSE)
@@ -37,7 +37,7 @@ Each page links its reference implementation; runnable versions are listed under
 npm install @odatano/x402 @odatano/core
 ```
 
-`@odatano/core` (the Cardano bridge) is a peer dependency. Install whichever version meets `>=1.9.1`.
+`@odatano/core` (the Cardano bridge) is a peer dependency. Install whichever version meets `>=2.0.0-rc.30`.
 
 ## Quick Start
 
@@ -123,7 +123,7 @@ Use-case pages are linked above; the technical references:
 
 - Node.js 22+
 - `@sap/cds >= 9` (peer)
-- `@odatano/core >= 1.9.1` (peer)
+- `@odatano/core >= 2.0.0-rc.30` (peer)
 - `express ^4` (peer), only if you use `x402Middleware`
 - A Cardano backend reachable via `@odatano/core` (Blockfrost / Koios / Ogmios)
 

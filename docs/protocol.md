@@ -64,6 +64,20 @@ Every accepted payment passes all six (in order):
 
 Plus a sanity guard: tx has at least one vkey witness → `unsigned_transaction`.
 
+The transfer method comes from `accepts[].extra.assetTransferMethod`
+(absent = `default`). The facilitator handles `default` and `script`;
+any other method → `unsupported_transfer_method`. For `script` it also
+requires:
+
+| Check | Code on failure |
+|---|---|
+| `payTo` is the address of the script from `extra.scriptHash`, or from `extra.script` plus `extra.parameters` | `script_address_mismatch` |
+| `extra.datum` set → an output to `payTo` carries an inline datum | `datum_missing` |
+| … and that datum equals `extra.datum` as PlutusData | `datum_mismatch` |
+
+Whether the datum suits the contract is not checked. A resource server
+that needs more passes `verifyTransfer` to the middleware → `transfer_rejected`.
+
 ### Pending settlements and the check-5 grace window
 
 When submit succeeds but the tx is not indexed within the settle poll

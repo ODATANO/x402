@@ -39,7 +39,6 @@ const REQS: PaymentRequirementsBody = {
     amount:              '1000000',
     payTo:               SELLER_ADDR,
     resource:            { url: 'https://api.example/foo', description: 'X', mimeType: 'application/json' },
-    assetTransferMethod: 'default',
     maxTimeoutSeconds:   600,
   }],
 };

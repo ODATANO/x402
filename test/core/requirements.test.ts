@@ -1,3 +1,7 @@
+// buildEntry checks script extras through srv/bridge → @odatano/core.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+jest.mock('@odatano/core', () => require('../fixtures/core-parse-mock').coreParseMock());
+
 import {
   buildPaymentRequirements,
   buildPaymentRequirementsMulti,
@@ -6,10 +10,13 @@ import {
 } from '../../srv/core/requirements';
 import {
   SELLER_ADDR,
-  BUYER_ADDR,
+  SCRIPT_ADDR,
+  SCRIPT_HASH,
+  OTHER_SCRIPT_HASH,
   USDM_PREPROD_ASSET,
   NETWORK_PREPROD,
 } from '../fixtures/constants';
+import type { PaymentExtra, ScriptTransferExtra } from '../../srv/core/types';
 
 describe('buildEntry', () => {
   const baseArgs = {
@@ -29,7 +36,6 @@ describe('buildEntry', () => {
       amount:  '1000000',
       payTo:   SELLER_ADDR,
       resource: { url: '/odata/v4/foo/getBar', description: 'X', mimeType: 'application/json' },
-      assetTransferMethod: 'default',
       maxTimeoutSeconds: 600,
     });
   });
@@ -78,14 +84,65 @@ describe('buildEntry', () => {
     expect(e.extra).toEqual({ decimals: 6, fingerprint: 'asset12…' });
   });
 
-  it('honours assetTransferMethod override', () => {
-    const e = buildEntry({ ...baseArgs, assetTransferMethod: 'masumi' });
-    expect(e.assetTransferMethod).toBe('masumi');
+  it('rejects a transfer method it cannot verify', () => {
+    expect(() => buildEntry({
+      ...baseArgs,
+      extra: { assetTransferMethod: 'masumi' } as unknown as PaymentExtra,
+    })).toThrow(/'masumi' is not supported/);
   });
 
   it('honours maxTimeoutSeconds override', () => {
     const e = buildEntry({ ...baseArgs, maxTimeoutSeconds: 30 });
     expect(e.maxTimeoutSeconds).toBe(30);
+  });
+});
+
+describe('buildEntry, script transfer', () => {
+  const scriptArgs = (extra: Partial<ScriptTransferExtra>, payTo = SCRIPT_ADDR) => ({
+    amount: '2000000',
+    asset:  'lovelace',
+    payTo,
+    network: NETWORK_PREPROD,
+    resource: '/lock',
+    extra: { assetTransferMethod: 'script' as const, scriptHash: SCRIPT_HASH, ...extra },
+  });
+
+  it('keeps the script extra on the entry', () => {
+    const e = buildEntry(scriptArgs({ datum: 'd8799f182aff' }));
+    expect(e.extra).toEqual({ assetTransferMethod: 'script', scriptHash: SCRIPT_HASH, datum: 'd8799f182aff' });
+  });
+
+  it('requires scriptHash or script', () => {
+    expect(() => buildEntry(scriptArgs({ scriptHash: undefined }))).toThrow(/needs extra.scriptHash or extra.script/);
+  });
+
+  it('rejects a malformed scriptHash', () => {
+    expect(() => buildEntry(scriptArgs({ scriptHash: 'ABC' }))).toThrow(/56 hex chars/);
+  });
+
+  it('rejects a payTo that is not a script address', () => {
+    expect(() => buildEntry(scriptArgs({}, SELLER_ADDR))).toThrow(/payTo must be a script address/);
+  });
+
+  it('rejects a payTo of a different script', () => {
+    expect(() => buildEntry(scriptArgs({ scriptHash: OTHER_SCRIPT_HASH }))).toThrow(/is not the declared script/);
+  });
+
+  it('rejects a datum that is not CBOR PlutusData', () => {
+    expect(() => buildEntry(scriptArgs({ datum: 'xyz' }))).toThrow(/CBOR hex of PlutusData/);
+    expect(() => buildEntry(scriptArgs({ datum: 'ff' }))).toThrow(/CBOR hex of PlutusData/);
+  });
+
+  it('rejects plutusV1 and unknown script types', () => {
+    expect(() => buildEntry(scriptArgs({ script: { type: 'plutusV1', code: '00' } }))).toThrow(/'plutusV1' is not supported/);
+    const script = { type: 'native', code: '00' } as unknown as ScriptTransferExtra['script'];
+    expect(() => buildEntry(scriptArgs({ script }))).toThrow(/'native' is not supported/);
+  });
+
+  it('accepts a script whose derived hash is the payTo credential', () => {
+    jest.requireMock('@odatano/core').plutusScriptHash.mockReturnValue(SCRIPT_HASH);
+    const e = buildEntry(scriptArgs({ scriptHash: undefined, script: { type: 'plutusV3', code: 'aabb' } }));
+    expect(e.extra).toMatchObject({ script: { type: 'plutusV3', code: 'aabb' } });
   });
 });
 
@@ -134,15 +191,16 @@ describe('buildPaymentRequirementsMulti', () => {
     expect(body.accepts[1]!.payTo).toBe(SELLER_ADDR);
   });
 
-  it('per-option payTo / network / assetTransferMethod override top-level defaults', () => {
+  it('per-option payTo / network / extra override top-level defaults', () => {
     const body = buildPaymentRequirementsMulti({
       ...baseArgs,
+      extra: { tier: 'base' },
       options: [
-        { amount: '1000000', payTo: BUYER_ADDR, assetTransferMethod: 'masumi' },
+        { amount: '1000000', payTo: SCRIPT_ADDR, extra: { assetTransferMethod: 'script', scriptHash: SCRIPT_HASH } },
       ],
     });
-    expect(body.accepts[0]!.payTo).toBe(BUYER_ADDR);
-    expect(body.accepts[0]!.assetTransferMethod).toBe('masumi');
+    expect(body.accepts[0]!.payTo).toBe(SCRIPT_ADDR);
+    expect(body.accepts[0]!.extra).toEqual({ assetTransferMethod: 'script', scriptHash: SCRIPT_HASH });
   });
 
   it('throws on empty options array', () => {

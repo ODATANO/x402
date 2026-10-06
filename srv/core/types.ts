@@ -9,8 +9,47 @@
 
 import type { Network } from './network';
 
-/** Asset-transfer method. v2 spec.  MVP supports only `default`. */
+/** Asset-transfer method. v2 spec. This library handles `default` and `script`. */
 export type AssetTransferMethod = 'default' | 'masumi' | 'script';
+
+/** Plutus script inlined in a `script` transfer. */
+export interface TransferScript {
+  type: 'plutusV1' | 'plutusV2' | 'plutusV3';
+  /** CBOR hex of the compiled script. */
+  code: string;
+}
+
+/** One parameter applied to a `script` transfer's script. */
+export interface TransferScriptParameter {
+  type: 'bytes' | 'bigint' | 'integer' | 'string' | 'constr' | 'list' | 'map' | 'boolean';
+  /** Encoding depends on `type`. */
+  value: unknown;
+}
+
+/** `extra` of an address-to-address payment. */
+export interface DefaultTransferExtra {
+  [key: string]: unknown;
+  assetTransferMethod?: 'default';
+}
+
+/**
+ * `extra` of a payment that locks funds at a script address. `payTo` must be
+ * the address of the script named by `scriptHash`, or by `script` plus
+ * `parameters`.
+ */
+export interface ScriptTransferExtra {
+  [key: string]: unknown;
+  assetTransferMethod: 'script';
+  /** 56 hex chars. */
+  scriptHash?: string;
+  script?: TransferScript;
+  parameters?: Record<string, TransferScriptParameter>;
+  /** CBOR hex; inline datum the buyer attaches to the `payTo` output. */
+  datum?: string;
+}
+
+/** `accepts[].extra`. `assetTransferMethod` selects the shape, absent means `default`. */
+export type PaymentExtra = DefaultTransferExtra | ScriptTransferExtra;
 
 /** v2 resource descriptor, was a bare string in v1. */
 export interface ResourceDescriptor {
@@ -35,10 +74,9 @@ export interface PaymentRequirementEntry {
   /** Bech32 recipient. */
   payTo: string;
   resource: ResourceDescriptor;
-  assetTransferMethod: AssetTransferMethod;
   maxTimeoutSeconds: number;
-  /** Optional opaque extra fields (e.g. UI hints, decimals). */
-  extra?: Record<string, unknown>;
+  /** Transfer method plus free-form fields (e.g. UI hints, decimals). */
+  extra?: PaymentExtra;
 }
 
 /** Canonical 402-response body. */
@@ -89,6 +127,14 @@ export interface PaymentClaim {
    * not resolve it. The one payer identity a resource server may bind to.
    */
   payerAddr?: string;
+  /** Set for `script` transfers. */
+  extra?: ScriptClaimExtra;
+}
+
+export interface ScriptClaimExtra {
+  assetTransferMethod: 'script';
+  /** `<txHash>#<outputIndex>` of every output paying `payTo`, i.e. the locked UTxOs. */
+  lockRefs: string[];
 }
 
 /** Diagnostic shape returned by `decode()` for downstream validation. */
@@ -114,6 +160,8 @@ export interface DecodedOutput {
   address: string;
   lovelace: string;
   assets: DecodedAsset[];
+  /** CBOR hex; null = no inline datum. */
+  inlineDatumHex: string | null;
 }
 
 export interface DecodedAsset {
@@ -149,9 +197,8 @@ export interface RouteOption {
   network?: Network | string;
   description?: string;
   mimeType?: string;
-  assetTransferMethod?: AssetTransferMethod;
   maxTimeoutSeconds?: number;
-  extra?: Record<string, unknown>;
+  extra?: PaymentExtra;
 }
 
 /**

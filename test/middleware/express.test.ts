@@ -12,8 +12,10 @@ import { bridgeFactory } from '../fixtures/mock-bridge';
 jest.mock('../../srv/bridge', () => bridgeFactory());
 
 const mockProcess = jest.fn();
+const mockCheckTransfer = jest.fn();
 jest.mock('../../srv/facilitator/verify', () => ({
   process: (...args: unknown[]) => mockProcess(...args),
+  checkTransfer: (...args: unknown[]) => mockCheckTransfer(...args),
 }));
 
 import { x402Middleware } from '../../srv/middleware/express';
@@ -226,7 +228,7 @@ describe('x402Middleware, 402 paths', () => {
         error: 'PAYMENT-SIGNATURE header is required',
         accepts: [{ scheme: 'exact', network: NETWORK_PREPROD, asset: 'lovelace', amount: '1000000',
                     payTo: SELLER_ADDR, resource: { url: '/foo', description: '', mimeType: 'application/json' },
-                    assetTransferMethod: 'default', maxTimeoutSeconds: 600 }],
+                    maxTimeoutSeconds: 600 }],
       },
     });
     const mw = x402Middleware(baseOpts);
@@ -320,8 +322,8 @@ describe('x402Middleware, optional process args', () => {
     expect(arg.allowNoTtl).toBe(true);
   });
 
-  it('forwards assetTransferMethod / maxTimeoutSeconds / extra into accepts[]', async () => {
-    let captured: { accepts: Array<{ assetTransferMethod?: string; maxTimeoutSeconds?: number; extra?: unknown }> } | undefined;
+  it('forwards maxTimeoutSeconds / extra into accepts[]', async () => {
+    let captured: { accepts: Array<{ maxTimeoutSeconds?: number; extra?: unknown }> } | undefined;
     mockProcess.mockImplementation(async (args: unknown) => {
       captured = (args as { requirementsBody: typeof captured }).requirementsBody;
       return {
@@ -331,12 +333,10 @@ describe('x402Middleware, optional process args', () => {
     });
     const mw = x402Middleware({
       ...baseOpts,
-      assetTransferMethod: 'default',
       maxTimeoutSeconds:   900,
       extra:               { tier: 'gold' },
     });
     await mw(mockReq(), mockRes() as unknown as Response, jest.fn());
-    expect(captured?.accepts[0]?.assetTransferMethod).toBe('default');
     expect(captured?.accepts[0]?.maxTimeoutSeconds).toBe(900);
     expect(captured?.accepts[0]?.extra).toEqual({ tier: 'gold' });
   });
@@ -359,6 +359,48 @@ describe('x402Middleware, optional process args', () => {
     // Simulate the facilitator invoking the wrapped onAccepted.
     await captured!({ txHash: 'h' });
     expect(userOnAccepted).toHaveBeenCalledWith({ txHash: 'h' }, expect.any(Object));
+  });
+});
+
+describe('x402Middleware, verifyTransfer', () => {
+  const accepted = {
+    kind: 'accepted', txHash: 'a'.repeat(64), paymentResponseB64: 'e30=',
+    payment: { txHash: 'a'.repeat(64) },
+  };
+
+  it('answers 402 transfer_rejected without calling the facilitator', async () => {
+    mockCheckTransfer.mockResolvedValue({
+      kind: 'rejected', code: Codes.TRANSFER_REJECTED, reason: 'wrong order id',
+      requirementsBody: { x402Version: 2, error: 'PAYMENT-SIGNATURE header is required', accepts: [] },
+    });
+    const verifyTransfer = jest.fn();
+    const mw = x402Middleware({ ...baseOpts, verifyTransfer });
+    const res = mockRes();
+    await mw(mockReq({ headers: { 'payment-signature': 'AAA' } }), res as unknown as Response, jest.fn());
+
+    expect(mockProcess).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(402);
+    expect(String((res.body as { error: string }).error)).toMatch(/transfer_rejected.*wrong order id/);
+    const arg = mockCheckTransfer.mock.calls[0]![0] as { paymentHeader: string; verifyTransfer: unknown };
+    expect(arg.paymentHeader).toBe('AAA');
+    expect(arg.verifyTransfer).toBe(verifyTransfer);
+  });
+
+  it('runs the facilitator when the check passes', async () => {
+    mockCheckTransfer.mockResolvedValue(null);
+    mockProcess.mockResolvedValue(accepted);
+    const mw = x402Middleware({ ...baseOpts, verifyTransfer: jest.fn() });
+    const next = jest.fn();
+    await mw(mockReq({ headers: { 'payment-signature': 'AAA' } }), mockRes() as unknown as Response, next);
+    expect(mockProcess).toHaveBeenCalledTimes(1);
+    expect(next).toHaveBeenCalledWith();
+  });
+
+  it('skips the check when no hook is set', async () => {
+    mockProcess.mockResolvedValue(accepted);
+    const mw = x402Middleware(baseOpts);
+    await mw(mockReq({ headers: { 'payment-signature': 'AAA' } }), mockRes() as unknown as Response, jest.fn());
+    expect(mockCheckTransfer).not.toHaveBeenCalled();
   });
 });
 

@@ -96,7 +96,11 @@ One of three discriminated `kind`s:
     "payTo":       "addr_test1...",             // verified recipient
     "resourceUrl": "/odata/v4/prices/Quotes",
     "nonceRef":    "<txHash>#<index>",
-    "payerAddr":   "addr_test1..."                // optional: the nonce UTxO's address = the buyer (0.5.2+)
+    "payerAddr":   "addr_test1...",               // optional: the nonce UTxO's address = the buyer (0.5.2+)
+    "extra": {                                    // only for assetTransferMethod 'script' (0.6.0+)
+      "assetTransferMethod": "script",
+      "lockRefs": ["<txHash>#<index>"]           // outputs paying payTo, i.e. the locked UTxOs
+    }
   },
   "paymentResponseB64": "<base64 of { success:true, network, transaction }>"
 }
@@ -138,7 +142,9 @@ The `rejected` and `pending` response carries one of the codes from
 | Stage     | Codes |
 |---|---|
 | Decode    | `missing_payment_header`, `invalid_base64`, `invalid_json`, `missing_field`, `unsupported_version`, `unsupported_scheme`, `unsupported_transfer_method`, `invalid_cbor`, `invalid_network_format`, `invalid_asset_format`, `invalid_nonce_format` |
-| Validate  | `network_mismatch`, `wrong_recipient`, `insufficient_amount`, `wrong_asset`, `replay_detected`, `nonce_not_referenced`, `expired_ttl`, `unsigned_transaction` |
+| Validate  | `network_mismatch`, `wrong_recipient`, `insufficient_amount`, `wrong_asset`, `replay_detected`, `nonce_not_referenced`, `expired_ttl`, `unsigned_transaction`, `unsupported_transfer_method` |
+| Script transfer | `script_address_mismatch`, `datum_missing`, `datum_mismatch` |
+| Resource server | `transfer_rejected` (the middleware's `verifyTransfer` hook; never sent by a facilitator) |
 | Settle    | `submit_failed`, `invalid_transaction_state` (= pending) |
 | Bridge    | `bridge_unavailable` |
 
@@ -165,7 +171,7 @@ Authorization: Bearer <apiKey>
 ```jsonc
 {
   "networks":             ["cardano:mainnet", "cardano:preprod", "cardano:preview"],
-  "assetTransferMethods": ["default"]
+  "assetTransferMethods": ["default", "script"]
 }
 ```
 

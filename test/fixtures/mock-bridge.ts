@@ -23,5 +23,7 @@ export function bridgeFactory() {
     isUtxoUnspent: jest.fn(),
     parseTransaction: jest.fn(),
     buildUnsignedTransfer: jest.fn(),
+    applyScriptParameters: jest.fn(),
+    plutusScriptHash: jest.fn(),
   };
 }

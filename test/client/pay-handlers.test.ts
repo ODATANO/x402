@@ -27,7 +27,6 @@ const REQ: PaymentRequirementEntry = {
   amount:              '1000000',
   payTo:               SELLER_ADDR,
   resource:            { url: '/foo', description: 'X', mimeType: 'application/json' },
-  assetTransferMethod: 'default',
   maxTimeoutSeconds:   600,
 };
 

@@ -211,12 +211,12 @@ gateService(this, { ...opts, facilitator: mock });
 | `skipPaths` | `RegExp` | no | matches `$metadata`, `$batch`, root, `/index` | Express only. Paths to bypass |
 | `description` | `string` | no | `''` | Embedded in `accepts[0].resource.description` |
 | `mimeType` | `string` | no | `'application/json'` | Embedded in `accepts[0].resource.mimeType` |
-| `assetTransferMethod` | `'default' \| 'masumi' \| 'script'` | no | `'default'` | v2 field; MVP supports only `default` |
 | `maxTimeoutSeconds` | `number` | no | `600` | Buyer-side TTL hint |
-| `extra` | `Record<string, unknown>` | no | - | Free-form extras (decimals, fingerprint, UI hints) |
+| `extra` | `PaymentExtra` | no | - | `assetTransferMethod` (absent = `'default'`) plus free-form extras (decimals, fingerprint, UI hints). See [Script transfers](#script-transfers-escrow-locks) |
 | `settlePollBudgetMs` | `number` | no | `60_000` | How long to poll for chain confirmation before returning `402 pending` |
 | `allowNoTtl` | `boolean` | no | `false` | If `true`, accept txs with no validity-range upper bound |
 | `onAccepted` | `(claim, req) => void \| Promise<void>` | no | - | Audit callback. Errors logged, never block response |
+| `verifyTransfer` | `(ctx) => { ok: true } \| { ok: false; reason } ` (sync or async) | no | - | Own check on the payment tx before the facilitator runs, e.g. the inline datum of a script lock. Rejection → `402 transfer_rejected`; a throw → `500` |
 | `resourceUrl` | `(req) => string` | no (CAP only) | derives from `req.http.req.originalUrl` | Override the resource URL emitted in the 402 body |
 | `facilitator` | `Facilitator` | no | `localFacilitator()` | Pluggable verify+settle. Pass `httpFacilitator({ url, apiKey })` for hosted, or any custom impl for mocks |
 | `receipts` | `boolean \| { entity?: string }` | no (CAP only) | `false` | Persist accepted payments to a CDS entity. `true` uses the shipped `odatano.x402.X402Receipts`; pass `{ entity }` for a custom table |
@@ -237,9 +237,8 @@ interface RouteOption {
   network?: Network | string;
   description?: string;
   mimeType?: string;
-  assetTransferMethod?: AssetTransferMethod;
   maxTimeoutSeconds?: number;
-  extra?: Record<string, unknown>;
+  extra?: PaymentExtra;        // replaces the top-level extra, not merged
 }
 
 type PriceResolver = (ctx: PricingContext) => PriceSpec | null | Promise<PriceSpec | null>;
@@ -269,9 +268,10 @@ gateService(this, {
 ```
 
 Native-asset prices (like the USDM entry) can be arbitrarily small, the
-payment output carries its own min-ADA on top. Lovelace prices below
-Cardano's min-UTxO (~0.98 ADA) are unpayable: the ledger rejects the
-output, so no compliant buyer can satisfy them.
+payment output carries its own min-ADA on top. A lovelace price below
+Cardano's min-UTxO (~0.98 ADA) makes the buyer pay the min-UTxO instead:
+`buildUnsignedPaymentTx` raises the output, which still passes check 3.
+Other clients may refuse such a price.
 
 The buyer picks one implicitly by which `(payTo, asset)` the payment tx
 actually credits; the facilitator's `pickRequirement()` selects the
@@ -295,6 +295,63 @@ x402Middleware({
 
 Returning `null` skips the gate (free tier or internal allowlist).
 Throwing surfaces as `500` to the buyer.
+
+#### Script transfers (escrow locks)
+
+With `extra.assetTransferMethod: 'script'` the buyer locks the payment at
+a script address instead of paying `payTo` directly. `payTo` is that
+script's address. `extra.datum` (CBOR hex) is the inline datum the buyer
+attaches to the locked output. The payment is settled once the lock is on
+chain. Spending it later is your contract's business, not x402's.
+
+```typescript
+gateService(this, {
+  payTo:   escrowAddress,              // address of the script below
+  network: 'cardano:preprod',
+  asset:   'lovelace',
+  routePricing: async (ctx) => ({
+    amount: '5000000',
+    extra: {
+      assetTransferMethod: 'script',
+      scriptHash: ESCROW_SCRIPT_HASH,  // 56 hex, must match payTo
+      datum:      await orderDatumFor(ctx),
+    },
+  }),
+  verifyTransfer: ({ decoded, requirement }) => {
+    const lock = decoded.outputs.find(o => o.address === requirement.payTo);
+    return lock?.inlineDatumHex && isMyOrderDatum(lock.inlineDatumHex)
+      ? { ok: true }
+      : { ok: false, reason: 'lock does not carry the order datum' };
+  },
+});
+```
+
+Instead of `scriptHash` you can declare the script itself:
+`script: { type: 'plutusV3', code }` plus optional `parameters`. The hash
+is then derived from the code with the parameters applied in key order.
+Parameter types are `bytes` (hex), `string` (UTF-8), `integer` /
+`bigint` and `boolean`, each applied as PlutusData. If both `script` and
+`scriptHash` are given they must agree. Plutus V2 and V3 only.
+
+The facilitator checks on top of the six mandatory checks:
+
+- `payTo` is the address of the declared script → else `script_address_mismatch`.
+- `extra.datum` set → an output to `payTo` carries an inline datum → else `datum_missing`.
+- that datum equals `extra.datum` as PlutusData → else `datum_mismatch`.
+  The encoding may differ, a client may re-encode the datum when attaching it.
+
+Whether the datum suits your contract is not checked: only your contract
+knows. A wrong datum can strand the buyer's funds. `verifyTransfer` is
+the place for anything beyond "the lock carries `extra.datum`".
+`buildEntry` refuses a `script` extra whose script does not match
+`payTo`, or whose `datum` is not CBOR PlutusData. The accepted claim
+carries `extra.lockRefs`, the `<txHash>#<index>` of every locked output.
+
+On the buyer side, the default `selectAccepts` takes the first entry with
+method `default` or `script`. `buildUnsignedPaymentTx` and
+`createBridgePayHandler` build the lock: they check the entry like the
+facilitator does, write `extra.datum` byte for byte as the inline datum,
+and let `@odatano/core` raise the output to its min-ADA.
 
 #### Receipts persistence (`receipts`)
 

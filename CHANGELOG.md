@@ -4,6 +4,11 @@ All notable changes to `@odatano/x402` are documented here. The format follows [
 
 **Pre-1.0 caveat:** minor versions may include breaking changes until `1.0.0`.
 
+## [0.7.1] - 2026-10-06
+
+### Fixed
+- **`npm run typecheck` and `npm run build` work in a clean checkout.** `cds-typer` loads the package's own `cds-plugin.js`, which needs the compiled `srv/plugin.js`; the plugin entry is now compiled first (`tsconfig.plugin.json`).
+
 ## [0.7.0] - 2026-10-06
 
 Conforms to x402 v2 and the Cardano `exact` scheme as specified in cardano-foundation/x402, interoperable with `@x402/cardano` in all four directions (client, resource server, facilitator, facilitator router).

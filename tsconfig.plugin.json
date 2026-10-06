@@ -1,0 +1,6 @@
+{
+  // The plugin entry alone. CAP tools such as cds-typer load cds-plugin.js,
+  // which needs srv/plugin.js, so it is compiled before the model types exist.
+  "extends": "./tsconfig.build.json",
+  "include": ["srv/plugin.ts", "srv/cds-augment.d.ts"]
+}

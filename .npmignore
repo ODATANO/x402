@@ -19,6 +19,7 @@ tsconfig.test.json
 # --- Build / tooling config ---
 tsconfig.json
 tsconfig.build.json
+tsconfig.plugin.json
 eslint.config.mjs
 codecov.yml
 .vscode/

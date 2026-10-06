@@ -1,6 +1,6 @@
 {
   "name": "@odatano/x402",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "x402 Cardano-v2 payment library for SAP CAP applications",
   "license": "Apache-2.0",
   "main": "srv/index.js",
@@ -15,7 +15,7 @@
     "examples/*"
   ],
   "scripts": {
-    "typer": "cds-typer \"*\" --outputDirectory @cds-models",
+    "typer": "tsc -p tsconfig.plugin.json && cds-typer \"*\" --outputDirectory @cds-models",
     "build": "npm run typer && tsc -p tsconfig.build.json",
     "watch": "cds watch",
     "start": "cds-serve",

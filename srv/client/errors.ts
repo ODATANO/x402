@@ -10,50 +10,45 @@
  * cannot complete. Callers can `instanceof`-check or pattern-match on
  * `.kind` to distinguish:
  *
- *   - 'server_rejected'      , the server returned 402 with a structured
- *                              body. `code` carries the server's
- *                              canonical X402Code (e.g. `wrong_recipient`),
- *                              `serverError` carries the raw error string
- *                              for human display.
- *   - 'pay_handler_failed'   , the user-supplied `pay` callback threw
- *                              (wallet rejection, no funds, signer error,
- *                              etc). `cause` holds the original error.
- *   - 'retries_exhausted'    , the request was still 402 after
- *                              `maxRetries` payment attempts. Same shape
- *                              as `server_rejected` but indicates
- *                              repeated failure.
- *   - 'invalid_402_body'     , the server returned 402 but the body
- *                              wasn't a v2 PaymentRequirementsBody.
- *   - 'settlement_pending'   , the payment tx was submitted (the 402
- *                              body carried `pending: true` + the tx
- *                              hash) but did not become visible on
- *                              chain within `pendingRetries` re-sends.
- *                              The buyer HAS paid; retry the same
- *                              request later rather than paying again.
+ *   - 'server_rejected'          , the server answered 402. `code` carries the
+ *                                  reason code (e.g.
+ *                                  `invalid_exact_cardano_payload_recipient_mismatch`),
+ *                                  `serverError` the raw error string.
+ *   - 'pay_handler_failed'       , the user-supplied `pay` callback threw
+ *                                  (wallet rejection, no funds, signer error).
+ *                                  `cause` holds the original error.
+ *   - 'retries_exhausted'        , still 402 after `maxRetries` payments.
+ *   - 'invalid_payment_required' , the 402 carried no valid `PAYMENT-REQUIRED` header.
+ *   - 'settlement_pending'       , the payment was broadcast (`PAYMENT-RESPONSE`
+ *                                  `settlement_pending`) but not confirmed within
+ *                                  `pendingRetries` re-sends. The buyer HAS paid;
+ *                                  retry the same request later, do not pay again.
  *
  * The class is plain (no abstract methods, no fluent builders) so users
  * can construct it themselves if they're wrapping the wrappers.
  */
 
-import type { PaymentRequirementEntry, PaymentRequirementsBody } from '../core/types';
+import type { PaymentRequired, PaymentRequirements, SettlementResponse } from '../core/types';
 
 export type X402PaymentErrorKind =
   | 'server_rejected'
   | 'retries_exhausted'
   | 'pay_handler_failed'
-  | 'invalid_402_body'
+  | 'invalid_payment_required'
   | 'settlement_pending';
 
 export interface X402PaymentErrorInit {
   message: string;
   kind: X402PaymentErrorKind;
-  /** Canonical X402Code from the server, when known. */
+  /** Reason code from the server, when known. */
   code?: string;
-  /** `accepts[]` from the 402 body, for the caller to retry against. */
-  accepts?: PaymentRequirementEntry[];
+  /** `accepts[]` of the 402, for the caller to retry against. */
+  accepts?: PaymentRequirements[];
+  /** `PAYMENT-RESPONSE` of the failed settlement, when the server sent one. */
+  settlement?: SettlementResponse;
   /** HTTP status code that triggered the error (usually 402). */
   httpStatus?: number;
-  /** Verbatim `error` string from the 402 body, for human display. */
+  /** Verbatim `error` string of the `PaymentRequired`, for human display. */
   serverError?: string;
   /** Wrapped underlying error (wallet rejection, axios error, etc.). */
   cause?: unknown;
@@ -69,7 +64,8 @@ export interface X402PaymentErrorInit {
 export class X402PaymentError extends Error {
   readonly kind: X402PaymentErrorKind;
   readonly code?: string;
-  readonly accepts?: PaymentRequirementEntry[];
+  readonly accepts?: PaymentRequirements[];
+  readonly settlement?: SettlementResponse;
   readonly httpStatus?: number;
   readonly serverError?: string;
   // Override Error's `cause` typing, ours is `unknown` to allow any value.
@@ -81,6 +77,7 @@ export class X402PaymentError extends Error {
     this.kind = init.kind;
     if (init.code        !== undefined) this.code        = init.code;
     if (init.accepts     !== undefined) this.accepts     = init.accepts;
+    if (init.settlement  !== undefined) this.settlement  = init.settlement;
     if (init.httpStatus  !== undefined) this.httpStatus  = init.httpStatus;
     if (init.serverError !== undefined) this.serverError = init.serverError;
     if (init.cause       !== undefined) this.cause       = init.cause;
@@ -93,44 +90,36 @@ export class X402PaymentError extends Error {
 }
 
 /**
- * Parse the (server, canonical) error string from a `PaymentRequirementsBody`.
- *
- * The middleware encodes failures as `"<base error> (<code>): <reason>"`
- * (see `cap.ts` / `express.ts`). We pull the code out so callers can
- * dispatch on it without re-parsing the wire string. The reason is
- * preserved in `.serverError`.
- *
- * Returns `undefined` when the body has no recognizable code (e.g. the
- * MISSING_HEADER path, where the middleware omits the parenthesised
- * suffix).
+ * Reason code inside a `PaymentRequired.error` string. The middleware
+ * writes `"payment rejected (<code>): <reason>"`; undefined when the
+ * string carries no code (the plain "header is required" 402).
  */
 export function parseErrorCode(serverError?: string): string | undefined {
   if (!serverError) return undefined;
-  const m = serverError.match(/\(([a-z_]+)\)/);
+  const m = serverError.match(/\(([a-z0-9_]+)\)/);
   return m ? m[1] : undefined;
 }
 
-/**
- * Build an `X402PaymentError` from a parsed 402 body. `kind` defaults
- * to `server_rejected`; pass `'retries_exhausted'` when called after
- * the retry loop gave up.
- */
-export function paymentErrorFromBody(
-  body: PaymentRequirementsBody,
+/** `X402PaymentError` from a 402: its `PaymentRequired` and, after a failed settle, its `PAYMENT-RESPONSE`. */
+export function paymentErrorFrom(
+  paymentRequired: PaymentRequired | undefined,
   init: {
     kind?: X402PaymentErrorKind;
     httpStatus?: number;
+    settlement?: SettlementResponse;
     cause?: unknown;
   } = {},
 ): X402PaymentError {
-  const code = parseErrorCode(body.error);
+  const serverError = paymentRequired?.error;
+  const code = init.settlement?.errorReason ?? parseErrorCode(serverError);
   return new X402PaymentError({
-    message:     body.error ?? 'payment required',
-    kind:        init.kind ?? 'server_rejected',
-    ...(code              !== undefined ? { code }                    : {}),
-    accepts:     body.accepts,
-    httpStatus:  init.httpStatus ?? 402,
-    ...(body.error        !== undefined ? { serverError: body.error } : {}),
-    ...(init.cause        !== undefined ? { cause: init.cause }       : {}),
+    message:    serverError ?? init.settlement?.errorReason ?? 'payment required',
+    kind:       init.kind ?? 'server_rejected',
+    ...(code !== undefined ? { code } : {}),
+    ...(paymentRequired ? { accepts: paymentRequired.accepts } : {}),
+    ...(init.settlement ? { settlement: init.settlement } : {}),
+    httpStatus: init.httpStatus ?? 402,
+    ...(serverError !== undefined ? { serverError } : {}),
+    ...(init.cause !== undefined ? { cause: init.cause } : {}),
   });
 }

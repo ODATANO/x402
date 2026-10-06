@@ -74,4 +74,8 @@ export const NONCE_REF     = `${NONCE_TX_HASH}#${NONCE_INDEX}`;
 /** A representative preprod slot, used as "now" in TTL tests. */
 export const CURRENT_SLOT = 80_000_000;
 export const FUTURE_SLOT  = CURRENT_SLOT + 3600; // ~1h ahead
+/** A TTL inside the default 600 s window. */
+export const TTL_SLOT     = CURRENT_SLOT + 300;
+/** Latest TTL slot for the default `maxTimeoutSeconds` of 600; what `posixToSlot` returns in tests. */
+export const MAX_TTL_SLOT = CURRENT_SLOT + 600;
 export const PAST_SLOT    = CURRENT_SLOT - 3600; // ~1h ago

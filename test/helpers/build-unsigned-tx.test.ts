@@ -20,7 +20,7 @@ jest.mock('../../srv/bridge', () => bridgeFactory());
 
 import * as bridge from '../../srv/bridge';
 import { buildUnsignedPaymentTx } from '../../srv/helpers/build-unsigned-tx';
-import { buildEntry } from '../../srv/core/requirements';
+import { buildRequirements } from '../../srv/core/requirements';
 import type { PaymentExtra, ScriptTransferExtra } from '../../srv/core/types';
 import {
   BUYER_ADDR, BUYER_VKH, SELLER_ADDR, SCRIPT_ADDR, SCRIPT_HASH,
@@ -70,17 +70,15 @@ function coreResult(opts: {
   };
 }
 
-function lovelaceRequirements(amount = '2000000') {
-  return buildEntry({
-    amount, asset: 'lovelace', payTo: SELLER_ADDR,
-    network: NETWORK_PREPROD, resource: '/r',
+function lovelaceRequirements(amount = '2000000', maxTimeoutSeconds = 600) {
+  return buildRequirements({
+    amount, asset: 'lovelace', payTo: SELLER_ADDR, network: NETWORK_PREPROD, maxTimeoutSeconds,
   });
 }
 
 function tokenRequirements(amount = '10') {
-  return buildEntry({
-    amount, asset: TEST_ASSET_STRING, payTo: SELLER_ADDR,
-    network: NETWORK_PREPROD, resource: '/r',
+  return buildRequirements({
+    amount, asset: TEST_ASSET_STRING, payTo: SELLER_ADDR, network: NETWORK_PREPROD,
   });
 }
 
@@ -117,7 +115,7 @@ describe('buildUnsignedPaymentTx, address validation', () => {
 });
 
 describe('buildUnsignedPaymentTx, script transfer', () => {
-  const scriptRequirements = (extra: Partial<ScriptTransferExtra>, payTo = SCRIPT_ADDR) => ({
+  const scriptRequirements = (extra: Partial<ScriptTransferExtra>, payTo: string = SCRIPT_ADDR) => ({
     ...lovelaceRequirements(),
     payTo,
     extra: { assetTransferMethod: 'script' as const, scriptHash: SCRIPT_HASH, ...extra },
@@ -136,7 +134,33 @@ describe('buildUnsignedPaymentTx, script transfer', () => {
     const req = mockedBridge.buildUnsignedTransfer.mock.calls[0]![0];
     expect(req.recipientAddress).toBe(SCRIPT_ADDR);
     expect(req.outputDatumCbor).toBe('d87981182a');
+    // A lovelace amount is the output coin; core rejects it below min-UTxO.
+    expect(req.ensureMinAda).toBeUndefined();
+  });
+
+  it('adds min-ADA to a token lock', async () => {
+    mockedBridge.buildUnsignedTransfer.mockResolvedValue(
+      coreResult({ inputs: [{ txHash: 'a'.repeat(64), index: 0, lovelace: '10000000' }] }),
+    );
+    mockedBridge.parseTransaction.mockReturnValue(
+      parsed({ inputs: [{ txHash: 'a'.repeat(64), outputIndex: 0 }], validityEnd: null }),
+    );
+    await buildUnsignedPaymentTx({
+      buyerBech32: BUYER_ADDR,
+      requirements: { ...scriptRequirements({ datum: 'd87980' }), asset: TEST_ASSET_STRING },
+    });
+    const req = mockedBridge.buildUnsignedTransfer.mock.calls[0]![0];
     expect(req.ensureMinAda).toBe(true);
+    expect(req.lovelaceAmount).toBe('0');
+    expect(req.outputDatumCbor).toBe('d87980');
+  });
+
+  it('refuses a malformed datum', async () => {
+    await expect(buildUnsignedPaymentTx({
+      buyerBech32: BUYER_ADDR,
+      requirements: scriptRequirements({ datum: 'xyz' }),
+    })).rejects.toThrow(/CBOR hex of PlutusData/);
+    expect(mockedBridge.buildUnsignedTransfer).not.toHaveBeenCalled();
   });
 
   it('refuses a payTo that is not the declared script', async () => {
@@ -175,7 +199,7 @@ describe('buildUnsignedPaymentTx, lovelace flow', () => {
     expect(req.changeAddress).toBe(BUYER_ADDR);
     expect(req.lovelaceAmount).toBe('2000000');
     expect(req.assets).toBeUndefined();
-    expect(req.ensureMinAda).toBe(true);
+    expect(req.ensureMinAda).toBeUndefined();
     expect(req.outputDatumCbor).toBeUndefined();
     expect(typeof req.validityEndMs).toBe('number');
 
@@ -188,26 +212,40 @@ describe('buildUnsignedPaymentTx, lovelace flow', () => {
     expect(r.inputs).toEqual([{ txHash: 'a'.repeat(64), outputIndex: 1, lovelace: '10000000' }]);
   });
 
-  it('sets validityEndMs from ttlSlotsFromNow (1s slots)', async () => {
+  async function validityEndFor(args: { ttlSeconds?: number; maxTimeoutSeconds?: number }) {
     mockedBridge.buildUnsignedTransfer.mockResolvedValue(
       coreResult({ inputs: [{ txHash: 'a'.repeat(64), index: 0, lovelace: '10000000' }] }),
     );
     mockedBridge.parseTransaction.mockReturnValue(
-      parsed({ inputs: [{ txHash: 'a'.repeat(64), outputIndex: 0 }], validityEnd: String(CURRENT_SLOT + 60) }),
+      parsed({ inputs: [{ txHash: 'a'.repeat(64), outputIndex: 0 }], validityEnd: null }),
     );
-
     const before = Date.now();
     await buildUnsignedPaymentTx({
       buyerBech32: BUYER_ADDR,
-      requirements: lovelaceRequirements(),
-      ttlSlotsFromNow: 60,
+      requirements: lovelaceRequirements('2000000', args.maxTimeoutSeconds ?? 600),
+      ...(args.ttlSeconds !== undefined ? { ttlSeconds: args.ttlSeconds } : {}),
     });
     const after = Date.now();
+    const end = mockedBridge.buildUnsignedTransfer.mock.calls[0]![0].validityEndMs!;
+    return { lo: end - after, hi: end - before };
+  }
 
-    const req = mockedBridge.buildUnsignedTransfer.mock.calls[0]![0];
-    // 60 slots ≈ 60_000 ms ahead of "now".
-    expect(req.validityEndMs).toBeGreaterThanOrEqual(before + 60_000);
-    expect(req.validityEndMs).toBeLessThanOrEqual(after + 60_000);
+  it('defaults the TTL to maxTimeoutSeconds minus the margin', async () => {
+    const { lo, hi } = await validityEndFor({});
+    expect(lo).toBeLessThanOrEqual(590_000);
+    expect(hi).toBeGreaterThanOrEqual(590_000);
+  });
+
+  it('uses a shorter ttlSeconds as given', async () => {
+    const { lo, hi } = await validityEndFor({ ttlSeconds: 60 });
+    expect(lo).toBeLessThanOrEqual(60_000);
+    expect(hi).toBeGreaterThanOrEqual(60_000);
+  });
+
+  it('caps ttlSeconds at maxTimeoutSeconds minus the margin', async () => {
+    const { lo, hi } = await validityEndFor({ ttlSeconds: 3600, maxTimeoutSeconds: 120 });
+    expect(lo).toBeLessThanOrEqual(110_000);
+    expect(hi).toBeGreaterThanOrEqual(110_000);
   });
 });
 

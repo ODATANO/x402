@@ -1,96 +1,87 @@
 /**
- * Tests for the CAP-backed receipts module. Exercises the option-shape
- * resolver and the INSERT success / failure paths. INSERT failures are
- * SWALLOWED by design (canonical record is on chain), so we assert the
- * promise resolves rather than rejects.
+ * Receipts against a real in-memory sqlite: the row, its columns and the
+ * transaction it is written in.
  */
 
-import '@sap/cds'; // ensure INSERT global exists before override
-import {
-  DEFAULT_RECEIPTS_ENTITY,
-  resolveReceiptsEntity,
-  persistReceipt,
-} from '../../srv/middleware/receipts';
+import cds from '@sap/cds';
+import { persistReceipt, DEFAULT_RECEIPTS_ENTITY } from '../../srv/middleware/receipts';
+import { deployTestDb, closeTestDb, rowsOf } from '../fixtures/db';
+import { BUYER_ADDR, SELLER_ADDR, NETWORK_PREPROD } from '../fixtures/constants';
 import type { PaymentClaim } from '../../srv/core/types';
 
-const claim: PaymentClaim = {
-  txHash:      'ab'.repeat(32),
-  payerAddr:   'addr_test1qpayer',
-  payTo:       'addr_test1qseller',
-  asset:       'lovelace',
-  amountUnits: '1000000',
-  network:     'cardano:preprod',
-  nonceRef:    'ab'.repeat(32) + '#0',
-};
+const ROUTE = '/odata/v4/prices/Quotes';
 
-const insertDesc = Object.getOwnPropertyDescriptor(globalThis, 'INSERT');
-function setINSERT(impl: unknown) {
-  Object.defineProperty(globalThis, 'INSERT', { value: impl, configurable: true, writable: true });
+function claim(txHash: string, payerAddr: string | undefined = BUYER_ADDR): PaymentClaim {
+  return {
+    txHash,
+    amountUnits: '1000000',
+    network:     NETWORK_PREPROD,
+    unit:        '',
+    asset:       'lovelace',
+    payTo:       SELLER_ADDR,
+    resourceUrl: ROUTE,
+    nonceRef:    `${'dd'.repeat(32)}#0`,
+    ...(payerAddr ? { payerAddr } : {}),
+  };
 }
-afterEach(() => {
-  if (insertDesc) Object.defineProperty(globalThis, 'INSERT', insertDesc);
-});
 
-describe('resolveReceiptsEntity', () => {
-  it('returns null when receipts is falsy', () => {
-    expect(resolveReceiptsEntity(undefined)).toBeNull();
-    expect(resolveReceiptsEntity(false)).toBeNull();
-  });
+const receiptOf = async (txHash: string) =>
+  (await rowsOf<Record<string, unknown>>(DEFAULT_RECEIPTS_ENTITY)).find(r => r.txHash === txHash);
 
-  it('returns the default entity when receipts is true', () => {
-    expect(resolveReceiptsEntity(true)).toBe(DEFAULT_RECEIPTS_ENTITY);
-  });
+let warn: jest.SpyInstance;
 
-  it('returns a custom entity when provided', () => {
-    expect(resolveReceiptsEntity({ entity: 'my.ns.MyReceipts' })).toBe('my.ns.MyReceipts');
-  });
-
-  it('falls back to the default when entity is omitted', () => {
-    expect(resolveReceiptsEntity({})).toBe(DEFAULT_RECEIPTS_ENTITY);
-  });
-});
+beforeAll(deployTestDb);
+afterAll(closeTestDb);
+beforeEach(() => { warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined); });
+afterEach(() => { warn.mockRestore(); });
 
 describe('persistReceipt', () => {
-  it('inserts a row with the full claim shape', async () => {
-    const entries = jest.fn().mockResolvedValue(undefined);
-    const into    = jest.fn(() => ({ entries }));
-    setINSERT({ into });
-
-    await persistReceipt(DEFAULT_RECEIPTS_ENTITY, claim, '/api/foo');
-    expect(into).toHaveBeenCalledWith(DEFAULT_RECEIPTS_ENTITY);
-    const row = entries.mock.calls[0][0];
+  it('writes one row with every column of the claim', async () => {
+    const tx = 'a1'.repeat(32);
+    await persistReceipt(DEFAULT_RECEIPTS_ENTITY, claim(tx), ROUTE);
+    const row = await receiptOf(tx);
     expect(row).toMatchObject({
-      txHash:    claim.txHash,
-      payerAddr: claim.payerAddr,
-      payTo:     claim.payTo,
-      asset:     claim.asset,
-      amount:    claim.amountUnits,
-      network:   claim.network,
-      route:     '/api/foo',
-      nonceRef:  claim.nonceRef,
+      txHash:    tx,
+      payerAddr: BUYER_ADDR,
+      payTo:     SELLER_ADDR,
+      asset:     'lovelace',
+      amount:    '1000000',
+      network:   NETWORK_PREPROD,
+      route:     ROUTE,
+      nonceRef:  `${'dd'.repeat(32)}#0`,
     });
-    expect(typeof row.ID).toBe('string');
-    expect(new Date(row.at).toString()).not.toBe('Invalid Date');
+    expect(row!.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(Number.isNaN(Date.parse(String(row!.at)))).toBe(false);
+    expect(warn).not.toHaveBeenCalled();
   });
 
-  it('writes payerAddr=null when the claim has none', async () => {
-    const entries = jest.fn().mockResolvedValue(undefined);
-    setINSERT({ into: () => ({ entries }) });
-
-    const noPayer: PaymentClaim = { ...claim, payerAddr: undefined };
-    await persistReceipt(DEFAULT_RECEIPTS_ENTITY, noPayer, '/api/foo');
-    expect(entries.mock.calls[0][0].payerAddr).toBeNull();
+  it('writes payerAddr null when the claim has none', async () => {
+    const tx = 'a2'.repeat(32);
+    await persistReceipt(DEFAULT_RECEIPTS_ENTITY, claim(tx, ''), ROUTE);
+    expect((await receiptOf(tx))!.payerAddr).toBeNull();
   });
 
-  it('swallows INSERT failure (canonical record is on chain)', async () => {
-    setINSERT({ into: () => ({ entries: () => Promise.reject(new Error('db down')) }) });
-    await expect(persistReceipt(DEFAULT_RECEIPTS_ENTITY, claim, '/api/foo'))
-      .resolves.toBeUndefined();
+  it('commits on its own, so the row survives a failing outer transaction', async () => {
+    const tx = 'a3'.repeat(32);
+    await expect(cds.tx(async () => {
+      await persistReceipt(DEFAULT_RECEIPTS_ENTITY, claim(tx), ROUTE);
+      throw new Error('request failed');
+    })).rejects.toThrow('request failed');
+    expect(await receiptOf(tx)).toBeDefined();
   });
 
-  it('handles non-Error rejection objects without crashing', async () => {
-    setINSERT({ into: () => ({ entries: () => Promise.reject('plain string') }) });
-    await expect(persistReceipt(DEFAULT_RECEIPTS_ENTITY, claim, '/api/foo'))
-      .resolves.toBeUndefined();
+  it('keeps one row per txHash; a second insert is logged, not thrown', async () => {
+    const tx = 'a4'.repeat(32);
+    await persistReceipt(DEFAULT_RECEIPTS_ENTITY, claim(tx), ROUTE);
+    await expect(persistReceipt(DEFAULT_RECEIPTS_ENTITY, claim(tx), ROUTE)).resolves.toBeUndefined();
+    const rows = (await rowsOf<Record<string, unknown>>(DEFAULT_RECEIPTS_ENTITY)).filter(r => r.txHash === tx);
+    expect(rows).toHaveLength(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('logs an insert into a missing entity instead of throwing', async () => {
+    await expect(persistReceipt('no.such.Entity', claim('a5'.repeat(32)), ROUTE)).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]!.join(' ')).toContain('no.such.Entity');
   });
 });

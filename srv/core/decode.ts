@@ -1,195 +1,90 @@
 /**
- * Decode the `PAYMENT-SIGNATURE` header (Cardano-x402-v2 wire format).
- *
- * Wire format:
- *   PAYMENT-SIGNATURE: base64(JSON.stringify({
- *     x402Version: 2,
- *     scheme: 'exact',
- *     network: 'cardano:preprod' | 'cardano:mainnet' | 'cardano:preview',
- *     payload: {
- *       transaction: '<base64 CBOR of signed tx>',
- *       nonce:       '<txHash>#<outputIndex>'
- *     }
- *   }))
- *
- * The decoder is **pure**, no chain calls, no DB. It produces a
- * `DecodedPayment` that downstream `validate.ts` checks against
- * `PaymentRequirementEntry` (the 6 mandatory checks).
+ * Parse the signed transaction of a `PaymentPayload` into the fields the
+ * verification rules need. Pure, no chain calls. The transaction hash
+ * comes from `@odatano/core` and is byte-preserving.
  */
 
-import { parseTransaction, type ParsedTx, type ParsedTxOutput } from '../bridge';
-import { X402Error, Codes, type X402Code } from './errors';
+import { parseTransaction, verifyTxWitnesses, type ParsedTx, type ParsedTxOutput } from '../bridge';
+import { base64ToBytes } from './base64';
+import { X402Error, Codes } from './errors';
+import { parseNonceRef } from './nonce';
 import type {
-  DecodedPayment,
-  DecodedOutput,
-  DecodedInput,
   DecodedAsset,
-  PaymentEnvelope,
+  DecodedInput,
+  DecodedOutput,
+  DecodedPayment,
+  PaymentPayload,
 } from './types';
 
-const SUPPORTED_VERSION = 2;
-const SUPPORTED_SCHEME  = 'exact';
-const NONCE_RE          = /^([0-9a-f]{64})#(\d+)$/i;
-
-function decodeBase64ToBuffer(s: string, errCode: X402Code): Buffer {
-  // Node's Buffer.from is lenient (silently drops bad chars). Re-encode
-  // and compare modulo padding to catch malformed input early, otherwise
-  // garbage in `transaction` would only fail at CBOR parse time with a
-  // confusing error.
-  const buf = Buffer.from(s, 'base64');
-  if (buf.toString('base64').replace(/=+$/, '') !== String(s).replace(/=+$/, '')) {
-    throw new X402Error(errCode, 'malformed base64 payload');
-  }
-  return buf;
+function toAsset(a: { unit: string; quantity: string }): DecodedAsset {
+  // core gives `unit` = policyId (56 hex) + assetNameHex
+  const unit = a.unit.toLowerCase();
+  return { unit, policyId: unit.slice(0, 56), assetNameHex: unit.slice(56), quantity: a.quantity };
 }
 
 function extractOutputs(outputs: ParsedTxOutput[]): DecodedOutput[] {
-  return outputs.map((o, i) => {
-    const assets: DecodedAsset[] = o.assets.map(a => {
-      // core gives `unit` = policyId(56 hex) + assetNameHex; split it back
-      // into the (policyId, assetNameHex) pair x402's validate.ts expects.
-      const unit = a.unit.toLowerCase();
-      return {
-        unit,
-        policyId:     unit.slice(0, 56),
-        assetNameHex: unit.slice(56),
-        quantity:     a.quantity,
-      };
-    });
-    return {
-      outputIndex:    i,
-      address:        o.address,
-      lovelace:       o.lovelace,
-      assets,
-      inlineDatumHex: o.inlineDatumHex ?? null,
-    };
-  });
-}
-
-function extractInputs(inputs: ParsedTx['inputs']): DecodedInput[] {
-  return inputs.map(inp => ({
-    txHash:      inp.txHash.toLowerCase(),
-    outputIndex: inp.outputIndex,
+  return outputs.map((o, i) => ({
+    outputIndex:    i,
+    address:        o.address,
+    lovelace:       o.lovelace,
+    assets:         o.assets.map(toAsset),
+    inlineDatumHex: o.inlineDatumHex ?? null,
+    ...(typeof o.cborSize === 'number' ? { cborSize: o.cborSize } : {}),
   }));
 }
 
-/**
- * Convert core's decimal-string slot bounds to numbers. Both bounds can
- * be null, in which case the downstream TTL check is skipped (per v2
- * spec: only validate TTL if the buyer set one). Slots fit comfortably
- * in a JS number (current preprod ~85M, max safe int 9e15).
- */
-function extractValidityRange(parsed: ParsedTx): {
-  ttlSlot: number | null;
-  validityStartSlot: number | null;
-} {
-  const toSlot = (s: string | null): number | null => {
-    if (s == null) return null;
-    const n = Number(s);
-    return Number.isFinite(n) ? n : null;
-  };
-  return {
-    ttlSlot:           toSlot(parsed.validityEnd),
-    validityStartSlot: toSlot(parsed.validityStart),
-  };
+function extractInputs(inputs: ParsedTx['inputs']): DecodedInput[] {
+  return inputs.map(inp => ({ txHash: inp.txHash.toLowerCase(), outputIndex: inp.outputIndex }));
 }
 
-interface RawEnvelope {
-  x402Version?: number;
-  scheme?: string;
-  network?: string;
-  payload?: { transaction?: string; nonce?: string };
+/** core reports slots as decimal strings; they fit a JS number. */
+function toSlot(s: string | null): number | null {
+  if (s == null) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
 }
 
-function parseNonceRef(nonce: string): { txHash: string; index: number } {
-  const m = NONCE_RE.exec(nonce);
-  if (!m) {
-    throw new X402Error(
-      Codes.INVALID_NONCE_FORMAT,
-      `nonce '${nonce}' must be '<txHash>#<outputIndex>' (64-hex#int)`,
-    );
-  }
-  const idx = Number(m[2]);
-  if (!Number.isFinite(idx) || idx < 0 || idx > 65535) {
-    throw new X402Error(
-      Codes.INVALID_NONCE_FORMAT,
-      `nonce output index ${m[2]} out of range`,
-    );
-  }
-  return { txHash: m[1]!.toLowerCase(), index: idx };
+/** Names of body parts that move value outside inputs and outputs. */
+function extraBodyContent(parsed: ParsedTx): string[] {
+  const found: string[] = [];
+  if (parsed.withdrawals?.length) found.push('withdrawals');
+  if (parsed.certificates?.length) found.push('certificates');
+  if (parsed.votingProcedures) found.push('voting procedures');
+  if (parsed.proposalProcedures) found.push('proposal procedures');
+  if (parsed.treasuryDonation != null && BigInt(parsed.treasuryDonation) > 0n) found.push('treasury donation');
+  return found;
 }
 
-/**
- * Decode a `PAYMENT-SIGNATURE` header value end-to-end. Throws X402Error
- * with a precise `code` on any malformed input, the caller catches and
- * surfaces the code in the 402 response body.
- */
-export function decode(paymentHeader: string | undefined | null): DecodedPayment {
-  if (!paymentHeader || typeof paymentHeader !== 'string') {
-    throw new X402Error(Codes.MISSING_HEADER);
+/** Throws `X402Error` (`transaction_decode_failed`, `nonce_invalid`). */
+export function decodePayment(payload: PaymentPayload): DecodedPayment {
+  const nonce = parseNonceRef(payload.payload.nonce);
+  if (!nonce) {
+    throw new X402Error(Codes.INVALID_NONCE_FORMAT, `nonce '${String(payload.payload.nonce)}' must be '<txHash>#<outputIndex>'`);
   }
-
-  // 1. base64 → JSON
-  const outerBuf = decodeBase64ToBuffer(paymentHeader, Codes.INVALID_BASE64);
-  let raw: RawEnvelope;
-  try { raw = JSON.parse(outerBuf.toString('utf8')) as RawEnvelope; }
-  catch { throw new X402Error(Codes.INVALID_JSON, 'PAYMENT-SIGNATURE body is not valid JSON'); }
-
-  // 2. Field shape
-  for (const f of ['x402Version', 'scheme', 'network', 'payload'] as const) {
-    if (!(f in raw)) throw new X402Error(Codes.MISSING_FIELD, `missing field: ${f}`);
+  const txBytes = base64ToBytes(payload.payload.transaction);
+  if (!txBytes || txBytes.length === 0) {
+    throw new X402Error(Codes.INVALID_CBOR, 'payload.transaction is not base64');
   }
-  if (raw.x402Version !== SUPPORTED_VERSION) {
-    throw new X402Error(
-      Codes.UNSUPPORTED_VERSION,
-      `x402Version ${raw.x402Version} not supported (only ${SUPPORTED_VERSION})`,
-    );
-  }
-  if (raw.scheme !== SUPPORTED_SCHEME) {
-    throw new X402Error(
-      Codes.UNSUPPORTED_SCHEME,
-      `scheme '${raw.scheme}' not supported (only '${SUPPORTED_SCHEME}')`,
-    );
-  }
-  const payload = raw.payload;
-  if (!payload || typeof payload.transaction !== 'string') {
-    throw new X402Error(Codes.MISSING_FIELD, 'payload.transaction is required');
-  }
-  if (typeof payload.nonce !== 'string' || payload.nonce.length === 0) {
-    throw new X402Error(Codes.MISSING_FIELD, 'payload.nonce is required (v2 UTxO-ref)');
-  }
-
-  // 3. Tx CBOR → structured fields via @odatano/core's pure Buildooor
-  //    parser. `parseTransaction` throws X402Error(INVALID_CBOR) on
-  //    malformed input, and its `txHash` (= body.hash) is byte-preserving,
-  //    the property the old CSL `FixedTransaction` path provided.
-  const txBuf = decodeBase64ToBuffer(payload.transaction, Codes.INVALID_CBOR);
-  const txCborHex = txBuf.toString('hex');
+  const txCborHex = Buffer.from(txBytes).toString('hex');
   const parsed = parseTransaction(txCborHex);
-
-  // 4. Diagnostics
-  const txHash = parsed.txHash.toLowerCase();
-  const vkeyWitnessCount = parsed.witnesses.vkeyCount;
-
-  const validity = extractValidityRange(parsed);
-  const nonce = parseNonceRef(payload.nonce);
-
-  const envelope: PaymentEnvelope = {
-    x402Version: SUPPORTED_VERSION,
-    scheme:      SUPPORTED_SCHEME,
-    network:     raw.network!,
-    payload:     { transaction: payload.transaction, nonce: payload.nonce },
-  };
+  const witnesses = verifyTxWitnesses(txCborHex);
 
   return {
-    envelope,
+    payload,
     txCborHex,
-    txHash,
+    txHash:            parsed.txHash.toLowerCase(),
     outputs:           extractOutputs(parsed.outputs),
     inputs:            extractInputs(parsed.inputs),
-    vkeyWitnessCount,
-    ttlSlot:           validity.ttlSlot,
-    validityStartSlot: validity.validityStartSlot,
+    mint:              (parsed.mint ?? []).map(toAsset),
+    fee:               parsed.fee,
+    vkeyWitnessCount:  parsed.witnesses.vkeyCount,
+    networkId:         parsed.networkId ?? null,
+    isValid:           parsed.isValid === true,
+    extraBodyContent:  extraBodyContent(parsed),
+    signerKeyHashes:   witnesses.signerKeyHashes.map(h => h.toLowerCase()),
+    witnessErrors:     witnesses.valid ? [] : witnesses.errors,
+    ttlSlot:           toSlot(parsed.validityEnd),
+    validityStartSlot: toSlot(parsed.validityStart),
     nonce,
   };
 }

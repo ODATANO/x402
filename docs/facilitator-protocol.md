@@ -1,244 +1,118 @@
-# Facilitator Protocol: `@odatano/x402` HTTP Wire Format
+# Facilitator API
 
-This document specifies the HTTP contract between a resource server using
-`@odatano/x402` and a **hosted facilitator** that handles verification
-and settlement.
-
-Resource servers wire a hosted facilitator via `httpFacilitator()`:
+`@odatano/x402` speaks the x402 v2 facilitator API (§7 of the
+specification). Any conformant facilitator works behind the middleware,
+and `createFacilitatorRouter()` serves one that any x402 v2 resource
+server can use.
 
 ```typescript
 import { x402Middleware, httpFacilitator } from '@odatano/x402';
 
 app.use('/api/premium', x402Middleware({
   payTo, network, asset, priceUnits,
-  facilitator: httpFacilitator({
-    url:    'https://facilitator.example/v1',
-    apiKey: process.env.FACILITATOR_API_KEY,
-  }),
+  facilitator: httpFacilitator({ url: 'https://facilitator.example/v1', apiKey: process.env.FACILITATOR_API_KEY }),
 }));
 ```
 
-Any service that conforms to the spec below can serve as the
-`facilitator` endpoint: Coinbase-style hosted, self-hosted in a
-sibling deployment, or a mock for testing.
-
----
-
-## Base URL
-
-All endpoints are relative to the `url` configured on the client. The
-client trims a trailing slash before joining, so both forms work:
-
-- `https://facilitator.example`
-- `https://facilitator.example/v1/`
-
----
-
-## Authentication
-
-If `apiKey` is set on the client, every request carries:
-
-```
-Authorization: Bearer <apiKey>
-```
-
-For custom schemes (mTLS, OAuth, signed-request), pass a `headers()`
-builder on the client; the returned object is merged on top of the
-defaults (your values win for any colliding header name).
-
----
+The resource server still decodes the payment transaction itself (for
+the claim and `verifyTransfer`), so it needs `@odatano/core` installed,
+but no Cardano backend of its own.
 
 ## Endpoints
 
-### `POST /verify-settle`
+All paths are relative to the configured `url`; a trailing slash is ignored.
+With `apiKey` set, every request carries `Authorization: Bearer <apiKey>`;
+a `headers()` builder adds anything else (mTLS, OAuth, signed requests).
 
-The single operation a facilitator MUST implement. Runs the full
-1.decode → 2.validate → 3.nonce → 4.settle pipeline.
+### `POST /verify`
 
-#### Request
+Read-only: checks the payment, never submits.
 
-```http
-POST /verify-settle HTTP/1.1
-Content-Type: application/json
-Authorization: Bearer <apiKey>
-```
-
-```jsonc
+```json
 {
-  "paymentHeader":     "<base64 PAYMENT-SIGNATURE envelope>",
-  "requirementsBody": {
-    "x402Version": 2,
-    "accepts": [ /* PaymentRequirementEntry; only accepts[0] is used */ ]
-  },
-  "settlePollBudgetMs": 60000,   // optional, default 60000
-  "allowNoTtl":         false    // optional, default false
+  "x402Version": 2,
+  "paymentPayload": { "x402Version": 2, "accepted": { "...": "..." }, "payload": { "transaction": "...", "nonce": "..." } },
+  "paymentRequirements": { "scheme": "exact", "network": "cardano:preprod", "...": "the entry the payment is checked against" }
 }
 ```
 
-Note: `onAccepted` is intentionally not transmitted. The
-`httpFacilitator` client invokes it locally after the response.
+Answer (`VerifyResponse`):
 
-#### Response: `200 OK`
-
-One of three discriminated `kind`s:
-
-##### `accepted`
-```jsonc
-{
-  "kind": "accepted",
-  "txHash": "ab8f…",
-  "payment": {
-    "txHash":      "ab8f…",
-    "amountUnits": "1000000",
-    "network":     "cardano:preprod",
-    "unit":        "",                          // empty for lovelace
-    "asset":       "lovelace",
-    "payTo":       "addr_test1...",             // verified recipient
-    "resourceUrl": "/odata/v4/prices/Quotes",
-    "nonceRef":    "<txHash>#<index>",
-    "payerAddr":   "addr_test1...",               // optional: the nonce UTxO's address = the buyer (0.5.2+)
-    "extra": {                                    // only for assetTransferMethod 'script' (0.6.0+)
-      "assetTransferMethod": "script",
-      "lockRefs": ["<txHash>#<index>"]           // outputs paying payTo, i.e. the locked UTxOs
-    }
-  },
-  "paymentResponseB64": "<base64 of { success:true, network, transaction }>"
-}
+```json
+{ "isValid": true, "payer": "addr_test1..." }
+{ "isValid": false, "invalidReason": "invalid_exact_cardano_payload_amount_insufficient", "extra": { "reason": "largest output to payTo carries 900000 < required 1000000 of lovelace" } }
 ```
 
-##### `rejected`
-```jsonc
-{
-  "kind": "rejected",
-  "code": "wrong_recipient",                    // canonical X402Code
-  "reason": "no output paid to addr_test1...",
-  "requirementsBody": { /* echoed back */ }
-}
+### `POST /settle`
+
+Same body. Claims the transaction id, submits once, waits (bounded) for
+`confirmationPolicy`. Answer (`SettlementResponse`):
+
+```json
+{ "success": true, "transaction": "<tx hash>", "network": "cardano:preprod", "payer": "addr_test1...", "amount": "1000000",
+  "extra": { "status": "confirmed", "confirmations": 1, "transactionId": "<tx hash>" } }
+{ "success": false, "errorReason": "settlement_pending", "transaction": "<tx hash>", "network": "cardano:preprod",
+  "extra": { "status": "pending", "confirmations": -1, "transactionId": "<tx hash>" } }
 ```
 
-##### `pending`
-```jsonc
-{
-  "kind": "pending",
-  "code": "invalid_transaction_state",
-  "txHash": "ab8f…",                            // optional, present if submit succeeded
-  "reason": "tx submitted, not yet on chain",   // optional
-  "requirementsBody": { /* echoed back */ }
-}
-```
-
-#### Response: `≥ 400`
-
-Any non-2xx status causes the client to throw. The middleware catches
-that and returns `500 Internal Server Error` to the buyer. Bodies on
-error responses are not parsed by the client and may carry diagnostic
-info for operators.
-
-#### Canonical `code` values
-
-The `rejected` and `pending` response carries one of the codes from
-`srv/core/errors.ts`:
-
-| Stage     | Codes |
-|---|---|
-| Decode    | `missing_payment_header`, `invalid_base64`, `invalid_json`, `missing_field`, `unsupported_version`, `unsupported_scheme`, `unsupported_transfer_method`, `invalid_cbor`, `invalid_network_format`, `invalid_asset_format`, `invalid_nonce_format` |
-| Validate  | `network_mismatch`, `wrong_recipient`, `insufficient_amount`, `wrong_asset`, `replay_detected`, `nonce_not_referenced`, `expired_ttl`, `unsigned_transaction`, `unsupported_transfer_method` |
-| Script transfer | `script_address_mismatch`, `datum_missing`, `datum_mismatch` |
-| Resource server | `transfer_rejected` (the middleware's `verifyTransfer` hook; never sent by a facilitator) |
-| Settle    | `submit_failed`, `invalid_transaction_state` (= pending) |
-| Bridge    | `bridge_unavailable` |
-
-A facilitator MAY extend with extra codes. Clients pass them through
-to the buyer in the 402 `error` field, but SHOULD prefer the canonical
-set for interoperability.
-
----
+Call it again with the same body after `settlement_pending`: the
+facilitator resumes observing; it submits again only if no backend is
+known to have taken the transaction. A settled or
+in-progress transaction answers `duplicate_settlement`.
 
 ### `GET /supported`
 
-Optional discovery endpoint. Used by tooling and health checks; the
-middleware path does not call it.
-
-#### Request
-
-```http
-GET /supported HTTP/1.1
-Authorization: Bearer <apiKey>
-```
-
-#### Response: `200 OK`
-
-```jsonc
+```json
 {
-  "networks":             ["cardano:mainnet", "cardano:preprod", "cardano:preview"],
-  "assetTransferMethods": ["default", "script"]
+  "kinds": [
+    { "x402Version": 2, "scheme": "exact", "network": "cardano:preprod",
+      "extra": { "assetTransferMethods": ["default", "script"], "areFeesSponsored": false, "l1Confirmations": { "minimum": 0, "maximum": 20 } } }
+  ],
+  "extensions": [],
+  "signers": {}
 }
 ```
 
-Future fields (non-breaking additions): per-network asset allow-lists,
-maximum amounts, rate-limit hints.
+Only the network the backend is connected to is listed. `signers` is
+empty: a Cardano facilitator only relays the buyer's signed transaction
+and signs nothing. `l1Confirmations.minimum` is -1 when
+`allowMempoolConfirmation` is set.
 
----
+### `GET /healthz`
 
-## Timeouts
+Liveness, `{ "ok": true }`, not auth-gated.
 
-The client times out each request at `timeoutMs` (default `90_000`).
-Facilitators SHOULD return a `pending` response, rather than letting
-the request hang, once their internal `settlePollBudgetMs` elapses;
-this gives the buyer a polling target via the returned `txHash`.
+## Reason codes
 
----
+| Stage | Codes |
+|---|---|
+| Payload | `invalid_payload`, `invalid_x402_version`, `unsupported_scheme`, `invalid_network`, `invalid_exact_cardano_payload_transaction_decode_failed`, `invalid_exact_cardano_payload_nonce_invalid` |
+| Requirements | `invalid_payment_requirements` (incl. `accepted` not offered), `invalid_exact_cardano_requirements`, `invalid_exact_cardano_requirements_policy` |
+| Verification | `invalid_exact_cardano_payload_` + `network_id_mismatch`, `recipient_mismatch`, `amount_insufficient`, `asset_mismatch`, `nonce_not_in_inputs`, `nonce_not_on_chain`, `input_not_available`, `value_not_conserved`, `phase1_invalid`, `fee_below_minimum`, `unsigned`, `invalid_signature`, `not_yet_valid`, `ttl_expired`, `ttl_too_far`, `min_utxo_insufficient`, `script_address_mismatch`, `datum_missing`, `datum_mismatch` |
+| Settlement | `settlement_pending`, `duplicate_settlement`, `exact_cardano_settlement_definitively_rejected`, `exact_cardano_settlement_failed`, `invalid_exact_cardano_payload_phase2_invalid`, `unexpected_settle_error` |
+| Other | `unexpected_verify_error`; `transfer_rejected` (the resource server's `verifyTransfer`, never from a facilitator) |
 
-## Idempotency
-
-`POST /verify-settle` is **not** idempotent at the network level (the
-same envelope replayed produces the same accepted/rejected outcome,
-but a fresh chain query happens each time). v2's nonce defense lives
-on-chain: once the buyer's nonce UTxO is consumed, a replay rejects
-with `replay_detected` and the facilitator MUST NOT charge it.
-
-A facilitator MAY cache verified envelopes to short-circuit duplicate
-submissions; if it does, it MUST honour the `Cache-Control: no-store`
-header from the resource server (currently unused; reserved for
-future buyer-driven cache-bust).
-
----
-
-## Reference implementation
-
-Use `createFacilitatorRouter()` to stand up a spec-compliant facilitator
-in a handful of lines. The router wraps a `Facilitator` (defaulting to
-the in-process `localFacilitator()`) and exposes the three endpoints
-above plus a `/healthz` liveness probe.
+## Serving a facilitator
 
 ```typescript
 import express from 'express';
-import { createFacilitatorRouter } from '@odatano/x402';
+import { createFacilitatorRouter, localFacilitator, cdsSettlementStore } from '@odatano/x402';
 
 const app = express();
-
 app.use('/v1', createFacilitatorRouter({
-  // Default: localFacilitator(), runs the pipeline in-process via
-  // @odatano/core. Pass any Facilitator to chain / mock / proxy.
-  auth: (req) =>
-    req.headers.authorization === `Bearer ${process.env.FACILITATOR_API_KEY}`,
-  onRejected: (result) => audit.log('x402.rejected', result),
-  onPending:  (result) => audit.log('x402.pending', result),
+  facilitator: localFacilitator({ store: cdsSettlementStore() }), // default: in-process store
+  auth: (req) => req.headers.authorization === `Bearer ${process.env.FACILITATOR_API_KEY}`,
+  onSettle: (response) => audit.log('x402.settle', response),
 }));
-
 app.listen(4040);
 ```
 
-Endpoints exposed: `POST /v1/verify-settle`, `GET /v1/supported`,
-`GET /v1/healthz`. The `/healthz` route bypasses `auth` so k8s / Cloud
-Run probes work without a token.
+Without `auth` the router is open. Several instances behind one URL must
+share the settlement store, or a pending retry that reaches another
+instance will not find its claim. The service needs `@odatano/core`
+configured against a Cardano backend.
 
-`onAccepted` does NOT cross the HTTP boundary, the matching
-`httpFacilitator()` client invokes it locally after the response. The
-router-side `onRejected` / `onPending` hooks fill the facilitator-side
-audit gap; both fire AFTER the response is sent and swallow errors.
-
-The deployed service needs `@odatano/core` configured against its own
-Cardano backend (Blockfrost / Koios / Ogmios). Resource servers calling
-this facilitator do **not** need `@odatano/core` themselves; that's the
-architectural win of the split.
+`localFacilitator` options: `store`, `settlePollBudgetMs` (default 75 000),
+`pollIntervalMs` (3 000), `claimGraceMs` (3 600 000),
+`allowMempoolConfirmation` (false). The client's `timeoutMs` (default
+90 000) must exceed the settle wait.

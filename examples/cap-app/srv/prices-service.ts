@@ -47,8 +47,8 @@ export class PricesService extends cds.ApplicationService {
       network: NETWORK,
       asset:   'lovelace',
       routePricing: {
-        // Multi-accept: buyers choose ADA or the configured token by
-        // which (payTo, asset) their payment tx actually credits.
+        // Multi-accept: buyers choose ADA or the configured token and
+        // name their choice in the payment's `accepted` entry.
         Quotes: [
           { amount: '1000000' },                                       // 1 ADA
           ...(TOKEN_ASSET ? [{ amount: TOKEN_AMOUNT, asset: TOKEN_ASSET }] : []),
@@ -59,6 +59,7 @@ export class PricesService extends cds.ApplicationService {
       // exposed read-only as PricesService.Settlements.
       receipts: true,
       description: 'Example: synthetic price feed',
+      serviceName: 'ODATANO price feed',
       onAccepted: (claim: PaymentClaim, req) => {
         log.info(
           `paid ${claim.amountUnits} ${claim.asset} for ${claim.resourceUrl}`,
@@ -68,7 +69,7 @@ export class PricesService extends cds.ApplicationService {
       },
     });
 
-    // Action handler, runs only AFTER x402 gate accepted the payment.
+    // Action handler, runs after the gate verified the payment; settlement follows before the response.
     this.on('getBestPrice', (req) => {
       const pair = (req.data as { pair?: string }).pair ?? 'ADA-USD';
       // Synthetic, a real feed would query upstream.

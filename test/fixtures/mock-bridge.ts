@@ -18,12 +18,21 @@ export function bridgeFactory() {
     getUtxosAtAddress: jest.fn(),
     getTransactionByHash: jest.fn(),
     getProtocolParameters: jest.fn(),
+    getFeeParameters: jest.fn(),
+    getTipHeight: jest.fn(),
+    posixToSlot: jest.fn(),
+    slotToPosixMs: jest.fn(),
     submitTransaction: jest.fn(),
+    trySubmit: jest.fn(),
+    getBackendNetwork: jest.fn(),
+    createdOutputs: jest.fn((tx: { outputs: Array<{ isCollateral?: boolean }>; spendsCollaterals?: boolean }) =>
+      tx.outputs.filter(o => Boolean(o.isCollateral) === (tx.spendsCollaterals === true))),
     getCurrentSlot: jest.fn(),
     isUtxoUnspent: jest.fn(),
     parseTransaction: jest.fn(),
     buildUnsignedTransfer: jest.fn(),
     applyScriptParameters: jest.fn(),
     plutusScriptHash: jest.fn(),
+    verifyTxWitnesses: jest.fn(),
   };
 }

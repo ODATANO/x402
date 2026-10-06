@@ -1,320 +1,139 @@
 /**
- * The facilitator orchestrator: end-to-end pipeline from raw header to
- * an `accepted | rejected | pending` outcome.
+ * Facilitator `/verify` for Cardano `exact`: read-only, never submits.
  *
- * Pipeline (v2):
- *   1. decode               (PAYMENT-SIGNATURE → DecodedPayment)
- *   2. validate             (6 mandatory checks, pure)
- *   3. checkNonceUnspent    (chain, UTxO still spendable)
- *   4. settle               (submit + poll-until-confirmed)
- *   5. onAccepted callback  (consumer-side audit, best-effort)
- *
- * Order rationale:
- *   - `validate` runs the input-side (5a) BEFORE `checkNonceUnspent`
- *     does the chain-side (5b), so we avoid the round-trip for txs
- *     whose inputs don't include the claimed nonce.
- *   - `checkNonceUnspent` runs BEFORE `settle`, because submitting a
- *     CBOR whose nonce was already spent will fail at the network
- *     level anyway, and we want to return a precise REPLAY code
- *     instead of a generic SUBMIT_FAILED.
- *   - `onAccepted` runs ONLY after settle confirms, we never call it
- *     for pending/rejected outcomes.
+ *   1. requirements are well-formed and supported
+ *   2. `accepted` equals the requirements
+ *   3. the transaction decodes
+ *   4. not already settled (duplicate) by this facilitator
+ *   5. structural rules (core/validate.ts)
+ *   6. chain rules (chain.ts)
  */
 
-import cds from '@sap/cds';
-import { decode } from '../core/decode';
-import { validatePayment, pickRequirement } from '../core/validate';
-import { Codes, X402Error, type X402Code } from '../core/errors';
-import { checkNonceUnspent } from './nonce';
-import { resolvePayerAddress } from './payer';
-import { settle, type SettleArgs } from './settle';
 import * as bridge from '../bridge';
+import { decodePayment } from '../core/decode';
+import { validatePayment, type PaymentMatch } from '../core/validate';
+import { findAcceptedRequirements } from '../core/match';
+import { normalizeNetwork } from '../core/network';
+import { checkPaymentPayload } from '../core/payload';
+import { assertConfirmationPolicy } from '../core/requirements';
+import { isSupportedTransferMethod, transferMethodOf } from '../core/transfer-method';
+import { Codes, X402Error, type X402Code } from '../core/errors';
+import { checkOnChain } from './chain';
+import type { SettlementStore, SettlementRecord } from './store';
 import type {
   DecodedPayment,
-  PaymentClaim,
-  PaymentRequirementEntry,
-  PaymentRequirementsBody,
+  PaymentPayload,
+  PaymentRequirements,
+  VerifyResponse,
 } from '../core/types';
 
-const log = cds.log('x402');
-
-export type ProcessKind = 'accepted' | 'rejected' | 'pending';
-
-export interface TransferCheckContext {
-  decoded: DecodedPayment;
-  /** The `accepts[]` entry the payment was matched to. */
-  requirement: PaymentRequirementEntry;
+export interface VerifyOutcome {
+  response: VerifyResponse;
+  decoded?: DecodedPayment;
+  match?: PaymentMatch;
+  /** The claim this facilitator already holds for the transaction, if any. */
+  record?: SettlementRecord;
 }
 
-export type TransferCheckResult = { ok: true } | { ok: false; reason: string };
-
-/**
- * Resource-server check on the payment tx, e.g. the inline datum of a
- * `script` lock. The middlewares run it through `checkTransfer` before
- * the facilitator. A rejection answers 402 `transfer_rejected`; a throw
- * surfaces as a middleware failure.
- */
-export type VerifyTransfer = (ctx: TransferCheckContext) => TransferCheckResult | Promise<TransferCheckResult>;
-
-export interface ProcessArgs {
-  /** Raw header value (undefined if missing). */
-  paymentHeader: string | string[] | undefined;
-  /** Full 402 body, the validator inspects `accepts[0]`. */
-  requirementsBody: PaymentRequirementsBody;
-  /** Optional override of the settle poll budget (ms). Default 60_000. */
-  settlePollBudgetMs?: number;
-  /**
-   * Optional: callback invoked on successful payment. Use for consumer-
-   * side audit (e.g. CHAINFEED writing to FeedReads, ODATAPAY writing to
-   * Receipts). Throws here are swallowed and logged, the canonical
-   * record is on chain.
-   */
-  onAccepted?: (claim: PaymentClaim) => void | Promise<void>;
-  /**
-   * Optional: TTL check tolerance. Default false, txs without a
-   * validity-range upper bound are rejected.
-   */
-  allowNoTtl?: boolean;
-  /**
-   * Pending-retry grace window (ms). Default 300_000 (5 min); 0 disables.
-   *
-   * Closes the pending-retry race: a buyer whose payment got a
-   * `402 pending` re-sends the same envelope, but if the tx becomes
-   * visible BETWEEN two re-sends, the nonce check sees the nonce as
-   * spent (by this very payment) and would reject a paid buyer with
-   * REPLAY forever. Within this window, an envelope whose own tx is
-   * already on chain is accepted instead.
-   *
-   * Trade-off (deliberate): the same envelope is re-servable for up to
-   * `pendingGraceMs` after its block timestamp, an implicit mini-grant,
-   * semantically equivalent to the X402Grants feature. The window is
-   * anchored on the server-observed `blockTime` of the tx (not the
-   * buyer-controlled TTL); if the backend reports no blockTime the
-   * fallback does not apply and REPLAY stands. `onAccepted` (and the
-   * receipts INSERT) can fire more than once inside the window, so
-   * consumers' callbacks must be idempotent on `claim.txHash`.
-   */
-  pendingGraceMs?: number;
+export interface VerifyContext {
+  store: SettlementStore;
+  /** Accept `l1Confirmations: -1` (broadcast acceptance only). */
+  allowMempoolConfirmation: boolean;
 }
 
-export type ProcessResult =
-  | {
-      kind: 'accepted';
-      txHash: string;
-      payment: PaymentClaim;
-      /** base64 of `{ success: true, network, transaction }` for X-PAYMENT-RESPONSE header. */
-      paymentResponseB64: string;
-    }
-  | {
-      kind: 'rejected';
-      code: X402Code;
-      reason: string;
-      requirementsBody: PaymentRequirementsBody;
-    }
-  | {
-      kind: 'pending';
-      code: X402Code;
-      reason?: string;
-      txHash?: string;
-      requirementsBody: PaymentRequirementsBody;
-    };
-
-function paymentResponseHeaderB64(network: string, txHash: string): string {
-  return Buffer.from(JSON.stringify({
-    success: true, network, transaction: txHash,
-  }), 'utf8').toString('base64');
+function invalid(code: X402Code | string, reason: string): VerifyOutcome {
+  return { response: { isValid: false, invalidReason: code, extra: { reason } } };
 }
 
-/** Fills `claim.payerAddr` from the nonce UTxO; a backend miss leaves it unset. */
-async function attachPayer(claim: PaymentClaim, nonce: { txHash: string; index: number }): Promise<void> {
-  const payerAddr = await resolvePayerAddress(nonce);
-  if (payerAddr) claim.payerAddr = payerAddr;
-}
-
-async function runOnAccepted(
-  claim: PaymentClaim,
-  cb: ProcessArgs['onAccepted'],
-): Promise<void> {
-  if (!cb) return;
-  try {
-    await cb(claim);
-  } catch (err) {
-    log.warn(
-      'onAccepted callback failed (non-fatal):',
-      (err as { message?: string })?.message ?? err,
-    );
+/** Why the facilitator cannot verify against these requirements, or null. */
+export function requirementsProblem(
+  r: PaymentRequirements,
+  allowMempool: boolean,
+): { code: X402Code; reason: string } | null {
+  if (r?.scheme !== 'exact') {
+    return { code: Codes.UNSUPPORTED_SCHEME, reason: `scheme '${String(r?.scheme)}' is not supported` };
   }
-}
-
-function rejected(args: DecodeArgs, code: X402Code, reason: string): ProcessResult {
-  return { kind: 'rejected', code, reason, requirementsBody: args.requirementsBody };
-}
-
-type DecodeArgs = Pick<ProcessArgs, 'paymentHeader' | 'requirementsBody'>;
-
-/** Steps shared by `process` and `checkTransfer`: decode and pick the paid entry. */
-function decodeAndPick(
-  args: DecodeArgs,
-): { ok: true; decoded: DecodedPayment; requirements: PaymentRequirementEntry } | { ok: false; result: ProcessResult } {
-  const headerStr = Array.isArray(args.paymentHeader)
-    ? args.paymentHeader[0]
-    : args.paymentHeader;
-
-  if (!headerStr) {
-    return { ok: false, result: rejected(args, Codes.MISSING_HEADER, 'PAYMENT-SIGNATURE header is required') };
+  if (!normalizeNetwork(r.network)) {
+    return { code: Codes.INVALID_NETWORK_FORMAT, reason: `network '${String(r.network)}' is not supported` };
   }
+  const method = transferMethodOf(r);
+  if (!isSupportedTransferMethod(method)) {
+    return { code: Codes.UNSUPPORTED_METHOD, reason: `assetTransferMethod '${method}' is not supported` };
+  }
+  const policy = r.extra?.confirmationPolicy;
+  if (policy !== undefined) {
+    try {
+      assertConfirmationPolicy(policy);
+    } catch (err) {
+      return { code: Codes.INVALID_POLICY, reason: (err as Error).message };
+    }
+    if (policy.l1Confirmations === -1 && !allowMempool) {
+      return { code: Codes.INVALID_POLICY, reason: 'l1Confirmations -1 is not enabled on this facilitator' };
+    }
+  }
+  return null;
+}
 
-  // ─── 1. Decode ──────────────────────────────────────────────────────
-  // Decode happens BEFORE we pick a requirements entry, the picker needs
-  // to know which (payTo, asset) the tx actually credits to choose
-  // among multi-accept options.
+/** Requirements with the canonical network id, so CIP-34 aliases verify like their network. */
+export function canonicalRequirements(r: PaymentRequirements): PaymentRequirements {
+  const network = normalizeNetwork(r?.network);
+  return network && network !== r.network ? { ...r, network } : r;
+}
+
+export async function runVerify(
+  received: PaymentPayload,
+  offered: PaymentRequirements,
+  ctx: VerifyContext,
+): Promise<VerifyOutcome> {
+  const requirements = canonicalRequirements(offered);
+  const problem = requirementsProblem(requirements, ctx.allowMempoolConfirmation);
+  if (problem) return invalid(problem.code, problem.reason);
+
+  let payload: PaymentPayload;
   let decoded: DecodedPayment;
   try {
-    decoded = decode(headerStr);
-  } catch (err) {
-    if (err instanceof X402Error) {
-      return { ok: false, result: rejected(args, err.code as X402Code, err.message) };
+    payload = checkPaymentPayload(received);
+    if (!findAcceptedRequirements(payload.accepted, [requirements])) {
+      return invalid(Codes.ACCEPTED_MISMATCH, 'accepted does not equal the payment requirements');
     }
+    decoded = decodePayment(payload);
+  } catch (err) {
+    if (err instanceof X402Error) return invalid(err.code, err.message);
     throw err;
   }
 
-  // Pick the accepts[] entry the buyer paid against. For single-entry
-  // bodies this is the same as the old `flatRequirements`; for
-  // multi-accept it routes the tx to the matching seller option.
-  const picked = pickRequirement(decoded, args.requirementsBody);
-  if (!picked.ok) {
-    return { ok: false, result: rejected(args, picked.code, picked.reason) };
-  }
-  return { ok: true, decoded, requirements: picked.entry };
-}
-
-/**
- * Decode, pick the paid entry and run `verifyTransfer`, without chain
- * calls. Returns the rejection, or null when the facilitator may go on.
- */
-export async function checkTransfer(
-  args: DecodeArgs & { verifyTransfer: VerifyTransfer },
-): Promise<ProcessResult | null> {
-  const dp = decodeAndPick(args);
-  if (!dp.ok) return dp.result;
-  const r = await args.verifyTransfer({ decoded: dp.decoded, requirement: dp.requirements });
-  return r.ok ? null : rejected(args, Codes.TRANSFER_REJECTED, r.reason);
-}
-
-export async function process(args: ProcessArgs): Promise<ProcessResult> {
-  const dp = decodeAndPick(args);
-  if (!dp.ok) return dp.result;
-  const { decoded, requirements } = dp;
-
-  // ─── 2. Validate (6 checks, pure) ───────────────────────────────────
-  let currentSlot: number;
   try {
-    currentSlot = await bridge.getCurrentSlot();
+    const backend = await bridge.getBackendNetwork();
+    if (backend && backend !== requirements.network) {
+      return invalid(Codes.INVALID_NETWORK_FORMAT, `this facilitator serves ${backend}, not ${requirements.network}`);
+    }
+    const record = await ctx.store.get(decoded.txHash);
+    if (record?.state === 'settled') {
+      return invalid(Codes.DUPLICATE_SETTLEMENT, `transaction ${decoded.txHash} is already settled`);
+    }
+    // A transaction this facilitator broadcast spends its own inputs, so the
+    // unspent check no longer applies to it, even before an indexer shows
+    // it. The TTL stops gating once the ledger has it.
+    const inFlight = record?.state === 'submitting' || record?.state === 'pending';
+    const alreadyAccepted = inFlight && (await bridge.getTransactionByHash(decoded.txHash)) !== null;
+    const withContext = (o: VerifyOutcome): VerifyOutcome => ({ ...o, decoded, ...(record ? { record } : {}) });
+
+    const currentSlot = await bridge.getCurrentSlot();
+    const maxTtlSlot = bridge.posixToSlot(
+      requirements.network,
+      Date.now() + requirements.maxTimeoutSeconds * 1000,
+    );
+    const v = validatePayment(decoded, requirements, { currentSlot, maxTtlSlot, alreadyAccepted });
+    if (!v.ok) return withContext(invalid(v.code, v.reason));
+
+    const c = await checkOnChain(decoded, requirements, { alreadyAccepted: inFlight });
+    if (!c.ok) return withContext(invalid(c.code, c.reason));
+
+    return withContext({
+      response: { isValid: true, ...(c.payerAddr ? { payer: c.payerAddr } : {}) },
+      match: v.match,
+    });
   } catch (err) {
-    return {
-      kind: 'rejected',
-      code: (err as X402Error).code as X402Code ?? Codes.BRIDGE_UNAVAILABLE,
-      reason: `bridge.getCurrentSlot failed: ${(err as Error)?.message ?? err}`,
-      requirementsBody: args.requirementsBody,
-    };
+    return invalid(Codes.UNEXPECTED_VERIFY_ERROR, `verify failed: ${(err as Error)?.message ?? err}`);
   }
-
-  const v = validatePayment(decoded, requirements, {
-    currentSlot,
-    allowNoTtl: args.allowNoTtl,
-  });
-  if (!v.ok) {
-    return {
-      kind: 'rejected',
-      code: v.code,
-      reason: v.reason,
-      requirementsBody: args.requirementsBody,
-    };
-  }
-
-  // ─── 3. Nonce, UTxO still unspent (chain) ──────────────────────────
-  const nonceResult = await checkNonceUnspent({
-    txHash:      decoded.nonce.txHash,
-    outputIndex: decoded.nonce.index,
-  });
-  if (!nonceResult.ok) {
-    // Pending-retry fallback: the nonce may have been consumed by this
-    // very payment tx. If the envelope's own tx is on chain and young
-    // enough (server-observed blockTime within pendingGraceMs), this is
-    // a paid buyer whose earlier attempt timed out in settle, not a
-    // replay. See the ProcessArgs.pendingGraceMs doc for the trade-off.
-    const graceMs = args.pendingGraceMs ?? 300_000;
-    if (graceMs > 0) {
-      let onChain: { blockTime?: number | null } | null = null;
-      try {
-        onChain = await bridge.getTransactionByHash(decoded.txHash) as { blockTime?: number | null } | null;
-      } catch { /* backend hiccup → keep the REPLAY rejection below */ }
-      const blockTime = typeof onChain?.blockTime === 'number' && onChain.blockTime > 0
-        ? onChain.blockTime
-        : null;
-      if (blockTime != null) {
-        const ageMs = Date.now() - blockTime * 1000;
-        if (ageMs <= graceMs) {
-          log.info(
-            `pending-retry fallback: tx ${decoded.txHash} settled ${Math.max(0, Math.round(ageMs / 1000))}s ago; serving.`,
-          );
-          await attachPayer(v.claim, decoded.nonce);
-          await runOnAccepted(v.claim, args.onAccepted);
-          return {
-            kind: 'accepted',
-            txHash: v.claim.txHash,
-            payment: v.claim,
-            paymentResponseB64: paymentResponseHeaderB64(v.claim.network, v.claim.txHash),
-          };
-        }
-      }
-    }
-    return {
-      kind: 'rejected',
-      code: nonceResult.code,
-      reason: nonceResult.reason,
-      requirementsBody: args.requirementsBody,
-    };
-  }
-
-  // ─── 3b. Who paid: the nonce UTxO's address (best-effort) ───────────
-  await attachPayer(v.claim, decoded.nonce);
-
-  // ─── 4. Settle (submit + poll-until-confirmed) ──────────────────────
-  const settleArgs: SettleArgs = {
-    signedTxCborHex: decoded.txCborHex,
-    expectedTxHash:  decoded.txHash,
-  };
-  if (args.settlePollBudgetMs !== undefined) {
-    settleArgs.pollBudgetMs = args.settlePollBudgetMs;
-  }
-  const settled = await settle(settleArgs);
-  if (!settled.confirmed) {
-    if (settled.pending) {
-      return {
-        kind: 'pending',
-        code: settled.code ?? Codes.PENDING,
-        ...(settled.reason !== undefined ? { reason: settled.reason } : {}),
-        ...(settled.txHash !== undefined ? { txHash: settled.txHash } : {}),
-        requirementsBody: args.requirementsBody,
-      };
-    }
-    return {
-      kind: 'rejected',
-      code: settled.code ?? Codes.SUBMIT_FAILED,
-      reason: settled.reason ?? 'submit failed',
-      requirementsBody: args.requirementsBody,
-    };
-  }
-
-  // ─── 5. onAccepted (consumer audit, best-effort) ────────────────────
-  await runOnAccepted(v.claim, args.onAccepted);
-
-  // ─── 6. Success ─────────────────────────────────────────────────────
-  return {
-    kind: 'accepted',
-    txHash: v.claim.txHash,
-    payment: v.claim,
-    paymentResponseB64: paymentResponseHeaderB64(v.claim.network, v.claim.txHash),
-  };
 }

@@ -1,5 +1,5 @@
 /**
- * Cardano-x402-v2 asset identifier handling.
+ * Asset identifiers of Cardano `exact` (x402 v2).
  *
  * v2 expresses an asset as a single string:
  *   - For native assets:  `<policyIdHex>.<assetNameHex>`  (DOT separator)

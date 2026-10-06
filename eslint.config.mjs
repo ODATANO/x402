@@ -20,6 +20,7 @@ export default [
       'examples/**/dist/**',
       'coverage/**',
       'gen/**',
+      '@cds-models/**',
     ],
   },
   // @sap/cds defaults cover .js/.cjs/.mjs only; we extend with the
@@ -28,7 +29,7 @@ export default [
   ...tseslint.configs.recommended,
   // CLI example scripts talk to the user via stdout/stderr by design.
   {
-    files: ['examples/node-buyer/**/*.ts', 'examples/agent-buyer/**/*.ts', 'scripts/**/*.ts'],
+    files: ['examples/node-buyer/**/*.ts', 'examples/agent-buyer/**/*.ts', 'examples/interop-cf/**/*.ts', 'scripts/**/*.ts'],
     rules: { 'no-console': 'off' },
   },
 ]

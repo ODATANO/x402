@@ -61,6 +61,16 @@ export function paymentCredentialOf(bech32Addr: string): PaymentCredential | nul
   return null;
 }
 
+/** Network id of a Shelley address (header low nibble), or null when it has none. */
+export function addressNetworkIdOf(bech32Addr: string): number | null {
+  try {
+    const bytes = bech32.fromWords(bech32.decode(bech32Addr, BECH32_LIMIT).words);
+    return bytes.length > 0 ? bytes[0]! & 0x0f : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Decode a bech32 Cardano address and extract its payment-credential
  * VKey hash. Throws for malformed bech32, script-cred payment, or

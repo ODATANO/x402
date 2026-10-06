@@ -1,12 +1,12 @@
 /**
  * Headless x402 buyer, the full flow in one script:
  *
- *   1. GET the gated endpoint with plain fetch → 402 + accepts[]
+ *   1. GET the gated endpoint with plain fetch → 402 + PAYMENT-REQUIRED
  *   2. x402Fetch + createBridgePayHandler:
  *        build unsigned payment tx (@odatano/core, server-side coin
  *        selection) → sign locally (buildooor vkey witness) → retry
  *        with PAYMENT-SIGNATURE header
- *   3. 200 OK: decode X-PAYMENT-RESPONSE for the settled tx hash
+ *   3. 200 OK: decode PAYMENT-RESPONSE for the settled tx hash
  *
  * Usage:
  *   BLOCKFROST_API_KEY=preprod_xxx npm run buy [-- <url>]
@@ -17,14 +17,16 @@
 import {
   x402Fetch,
   createBridgePayHandler,
+  readPaymentRequired,
+  readSettlement,
   bridge,
-  type PaymentRequirementEntry,
+  type PaymentRequirements,
 } from '@odatano/x402';
 import { loadWallet, createSignTx } from './wallet';
 
 const url = process.argv[2] ?? 'http://localhost:4004/odata/v4/prices/Quotes';
 
-function fmtPrice(r: PaymentRequirementEntry): string {
+function fmtPrice(r: PaymentRequirements): string {
   return r.asset === 'lovelace'
     ? `${Number(r.amount) / 1_000_000} ADA`
     : `${r.amount} of ${r.asset}`;
@@ -49,15 +51,19 @@ async function main(): Promise<void> {
     console.log(await probe.text());
     return;
   }
-  const body = await probe.json() as { accepts: PaymentRequirementEntry[] };
-  const offer = body.accepts[0]!;
+  const required = readPaymentRequired(probe.headers.get('PAYMENT-REQUIRED'));
+  const offer = required?.accepts[0];
+  if (!offer) {
+    console.log('402 without a valid PAYMENT-REQUIRED header.');
+    return;
+  }
   console.log('402 Payment Required. Server accepts:');
   console.log(`  price:   ${fmtPrice(offer)}`);
   console.log(`  payTo:   ${offer.payTo}`);
   console.log(`  network: ${offer.network}\n`);
 
   // ─── 2. Pay and retry ────────────────────────────────────────────────
-  let chosen: PaymentRequirementEntry | undefined;
+  let chosen: PaymentRequirements | undefined;
   const payHandler = createBridgePayHandler({
     buyerBech32: wallet.address,
     signTx: createSignTx(wallet.privateKeyHex),
@@ -65,10 +71,10 @@ async function main(): Promise<void> {
 
   const paidFetch = x402Fetch({
     errorOnFailure: true,
-    pay: async (requirement) => {
+    pay: async (requirement, paymentRequired) => {
       chosen = requirement;
       console.log(`Paying ${fmtPrice(requirement)}: build → sign → retry ...`);
-      return payHandler(requirement);
+      return payHandler(requirement, paymentRequired);
     },
   });
 
@@ -76,12 +82,9 @@ async function main(): Promise<void> {
   console.log(`\n${res.status} ${res.statusText}`);
 
   // ─── 3. Settlement receipt ───────────────────────────────────────────
-  const receiptB64 = res.headers.get('X-PAYMENT-RESPONSE');
-  if (receiptB64 && chosen) {
-    const receipt = JSON.parse(Buffer.from(receiptB64, 'base64').toString('utf8')) as {
-      transaction: string;
-    };
-    console.log(`settled tx: ${receipt.transaction}`);
+  const receipt = readSettlement(res.headers.get('PAYMENT-RESPONSE'));
+  if (receipt && chosen) {
+    console.log(`settled tx: ${receipt.transaction} (${receipt.extra?.confirmations ?? '?'} confirmations)`);
     console.log(`explorer:   ${explorerUrl(chosen.network, receipt.transaction)}\n`);
   }
 

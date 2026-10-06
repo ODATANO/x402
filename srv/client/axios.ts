@@ -1,37 +1,27 @@
 /**
  * `x402Axios`, attach a response interceptor to an existing axios
- * instance so 402 responses trigger a payment and retry.
+ * instance so 402 responses trigger a payment and retry (x402 v2, HTTP).
  *
- * **No hard axios dependency.** We use structural typing for the
- * instance: anything with the standard axios shape (interceptors,
- * request, defaults.headers) works. Verified against axios 1.x.
- *
- * Usage:
- *   import axios from 'axios';
- *   import { x402Axios, createBridgePayHandler } from '@odatano/x402';
+ * No hard axios dependency: the instance is typed structurally. Verified
+ * against axios 1.x.
  *
  *   const client = x402Axios(axios.create({ baseURL: '...' }), {
  *     pay: createBridgePayHandler({ buyerBech32, signTx }),
  *   });
- *   await client.get('/api/premium/foo');   // returns 200 after pay
+ *   await client.get('/api/premium/foo');   // 200 after paying
  */
 
-import { encodePaymentEnvelope } from './envelope';
-import { X402PaymentError, paymentErrorFromBody } from './errors';
-import type { X402ClientOptions } from './types';
-import type { PaymentRequirementsBody } from '../core/types';
+import { X402PaymentError, paymentErrorFrom } from './errors';
+import { encodePaymentPayload, isSettlementPending, readPaymentRequired, readSettlement } from './protocol';
 import { selectFirstSupported } from './select';
+import type { X402ClientOptions } from './types';
 
-// Marker key on the config to break infinite-retry loops.
+// Marker keys on the request config: payment retries, and same-header re-sends while pending.
 const RETRY_KEY = '__x402_x402Retries';
-// Marker key counting same-envelope re-sends after a `pending: true` 402.
 const PENDING_KEY = '__x402_x402PendingRetries';
 
-// ─── Structural axios shape ──────────────────────────────────────────
-// We only spell out what we actually touch.
-
 interface AxiosErrorLike {
-  response?: { status?: number; data?: unknown };
+  response?: { status?: number; headers?: unknown };
   config?: AxiosRequestConfigLike;
 }
 interface AxiosRequestConfigLike {
@@ -54,15 +44,15 @@ function isAxiosError(e: unknown): e is AxiosErrorLike {
   return !!e && typeof e === 'object' && 'response' in e;
 }
 
-/**
- * Attach the x402 response interceptor in-place and return the same
- * instance for chaining. The interceptor only fires on 402 responses;
- * everything else passes through unchanged.
- */
-export function x402Axios<T extends AxiosInstanceLike>(
-  instance: T,
-  opts: X402ClientOptions,
-): T {
+/** Header value from axios response headers (plain object or AxiosHeaders, lower-cased names). */
+function headerOf(headers: unknown, name: string): string | undefined {
+  if (!headers || typeof headers !== 'object') return undefined;
+  const h = headers as { get?: (n: string) => unknown } & Record<string, unknown>;
+  const v = typeof h.get === 'function' ? h.get(name) : h[name.toLowerCase()] ?? h[name];
+  return typeof v === 'string' ? v : undefined;
+}
+
+export function x402Axios<T extends AxiosInstanceLike>(instance: T, opts: X402ClientOptions): T {
   if (typeof opts?.pay !== 'function') {
     throw new TypeError('x402Axios: opts.pay must be a function');
   }
@@ -71,23 +61,6 @@ export function x402Axios<T extends AxiosInstanceLike>(
   const pendingDelayMs = opts.pendingRetryDelayMs ?? 2_000;
   const select         = opts.selectAccepts ?? selectFirstSupported;
 
-  function maybeWrap(
-    body: PaymentRequirementsBody | undefined,
-    kind: 'retries_exhausted' | 'server_rejected' | 'invalid_402_body',
-    httpStatus: number,
-    cause?: unknown,
-  ): X402PaymentError {
-    if (body && body.x402Version === 2 && Array.isArray(body.accepts)) {
-      return paymentErrorFromBody(body, { kind, httpStatus, cause });
-    }
-    return new X402PaymentError({
-      message:    `x402Axios: ${kind.replace('_', ' ')}`,
-      kind:       'invalid_402_body',
-      httpStatus,
-      ...(cause !== undefined ? { cause } : {}),
-    });
-  }
-
   instance.interceptors.response.use(
     (response) => response,
     async (error) => {
@@ -95,19 +68,16 @@ export function x402Axios<T extends AxiosInstanceLike>(
         throw error;
       }
       const cfg = error.config;
-      const retries = Number(cfg[RETRY_KEY] ?? 0);
-      const body = error.response.data as (PaymentRequirementsBody & { pending?: boolean }) | undefined;
       const status = error.response.status;
+      const paymentRequired = readPaymentRequired(headerOf(error.response.headers, 'payment-required'));
+      const settlement = readSettlement(headerOf(error.response.headers, 'payment-response'));
+      const withSettlement = settlement ? { settlement } : {};
 
-      // ─── Settlement pending: re-send the SAME envelope ──────────────
-      // Only after we already paid (PAYMENT-SIGNATURE present on cfg).
-      // The v2 contract is to retry the same header, NOT to pay again.
-      const alreadyPaid = !!cfg.headers?.['PAYMENT-SIGNATURE'];
-      if (alreadyPaid && body?.pending === true && body.x402Version === 2) {
+      if (isSettlementPending(settlement)) {
         const pends = Number(cfg[PENDING_KEY] ?? 0);
         if (pends >= pendingRetries) {
           if (opts.errorOnFailure) {
-            throw paymentErrorFromBody(body, { kind: 'settlement_pending', httpStatus: status, cause: error });
+            throw paymentErrorFrom(paymentRequired, { kind: 'settlement_pending', httpStatus: status, ...withSettlement, cause: error });
           }
           throw error;
         }
@@ -115,52 +85,56 @@ export function x402Axios<T extends AxiosInstanceLike>(
         return instance.request({ ...cfg, [PENDING_KEY]: pends + 1 });
       }
 
+      const retries = Number(cfg[RETRY_KEY] ?? 0);
       if (retries >= maxRetries) {
         if (opts.errorOnFailure) {
-          throw maybeWrap(body, 'retries_exhausted', status, error);
+          throw paymentErrorFrom(paymentRequired, { kind: 'retries_exhausted', httpStatus: status, ...withSettlement, cause: error });
         }
         throw error;
       }
-      if (!body || body.x402Version !== 2 || !Array.isArray(body.accepts) || body.accepts.length === 0) {
+      if (!paymentRequired || paymentRequired.accepts.length === 0) {
         if (opts.errorOnFailure) {
-          throw maybeWrap(body, 'invalid_402_body', status, error);
+          throw new X402PaymentError({
+            message:    'x402Axios: 402 without a valid PAYMENT-REQUIRED header',
+            kind:       'invalid_payment_required',
+            httpStatus: status,
+            cause:      error,
+          });
         }
         throw error;
       }
 
-      const chosen = select(body.accepts);
+      const chosen = select(paymentRequired.accepts);
       if (!chosen) {
         if (opts.errorOnFailure) {
-          throw maybeWrap(body, 'server_rejected', status, error);
+          throw paymentErrorFrom(paymentRequired, { kind: 'server_rejected', httpStatus: status, cause: error });
         }
         throw error;
       }
 
-      // Wrap pay-handler throws unconditionally, callers benefit from
-      // the structured shape regardless of errorOnFailure.
-      let payResult;
+      let paid;
       try {
-        payResult = await opts.pay(chosen);
+        paid = await opts.pay(chosen, paymentRequired);
       } catch (err) {
         throw new X402PaymentError({
           message: `x402Axios: pay handler failed: ${(err as { message?: string })?.message ?? String(err)}`,
           kind:    'pay_handler_failed',
-          accepts: body.accepts,
+          accepts: paymentRequired.accepts,
           cause:   err,
         });
       }
-      const header = encodePaymentEnvelope({
-        network:         chosen.network,
-        signedTxCborHex: payResult.signedTxCborHex,
-        nonceRef:        payResult.nonceRef,
+      const header = encodePaymentPayload({
+        paymentRequired,
+        accepted:        chosen,
+        signedTxCborHex: paid.signedTxCborHex,
+        nonceRef:        paid.nonceRef,
       });
 
-      const nextCfg: AxiosRequestConfigLike = {
+      return instance.request({
         ...cfg,
         headers: { ...(cfg.headers ?? {}), 'PAYMENT-SIGNATURE': header },
         [RETRY_KEY]: retries + 1,
-      };
-      return instance.request(nextCfg);
+      });
     },
   );
 

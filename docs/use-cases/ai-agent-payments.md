@@ -28,7 +28,7 @@ Agent (LLM)            MCP server (this example)          Seller
   │ buy_data(url)         │                                 │
   │───────────────────────│  ceiling + budget check         │
   │                       │── pay (sign in-process) ───────▶│ settle on chain
-  │ data + tx hash     ◀──│◀─ 200 + X-PAYMENT-RESPONSE ─────│
+  │ data + tx hash     ◀──│◀─ 200 + PAYMENT-RESPONSE ───────│
 ```
 
 ## Two security properties that make this deployable

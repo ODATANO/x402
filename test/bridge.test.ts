@@ -13,6 +13,7 @@ const mockClient = {
   submitTransaction:     jest.fn(),
   getCurrentSlot:        jest.fn(),
   isUtxoUnspent:         jest.fn(),
+  getLatestBlock:        jest.fn(),
 };
 const mockTxBuilder = {
   buildSimpleAdaTransaction:  jest.fn(),
@@ -21,14 +22,60 @@ const mockTxBuilder = {
 const mockInitialize    = jest.fn();
 const mockShutdown      = jest.fn();
 const mockParseTransaction = jest.fn();
+const mockPosixToSlot = jest.fn();
+const mockSlotToPosixMs = jest.fn();
+const mockApplyScriptParameters = jest.fn();
+const mockPlutusScriptHash = jest.fn();
+const mockVerifyTxWitnesses = jest.fn();
+const mockGetStatus = jest.fn();
 
-jest.mock('@odatano/core', () => ({
-  initialize:          (...a: unknown[]) => mockInitialize(...a),
-  shutdown:            (...a: unknown[]) => mockShutdown(...a),
-  getCardanoClient:    () => mockClient,
-  getCardanoTxBuilder: () => mockTxBuilder,
-  parseTransaction:    (...a: unknown[]) => mockParseTransaction(...a),
-}));
+function fullCoreMock() {
+  return {
+    initialize:            (...a: unknown[]) => mockInitialize(...a),
+    shutdown:              (...a: unknown[]) => mockShutdown(...a),
+    getCardanoClient:      () => mockClient,
+    getCardanoTxBuilder:   () => mockTxBuilder,
+    parseTransaction:      (...a: unknown[]) => mockParseTransaction(...a),
+    posixToSlot:           (...a: unknown[]) => mockPosixToSlot(...a),
+    slotToPosixMs:         (...a: unknown[]) => mockSlotToPosixMs(...a),
+    applyScriptParameters: (...a: unknown[]) => mockApplyScriptParameters(...a),
+    plutusScriptHash:      (...a: unknown[]) => mockPlutusScriptHash(...a),
+    verifyTxWitnesses:     (...a: unknown[]) => mockVerifyTxWitnesses(...a),
+    getStatus:             (...a: unknown[]) => mockGetStatus(...a),
+  };
+}
+
+jest.mock('@odatano/core', () => fullCoreMock());
+
+import { Codes } from '../srv/core/errors';
+
+/** Load the bridge against a core barrel that lacks some exports, then restore the full mock. */
+function loadBridgeWithout(missing: string[]): typeof import('../srv/bridge') {
+  let mod: typeof import('../srv/bridge') | undefined;
+  try {
+    jest.isolateModules(() => {
+      jest.doMock('@odatano/core', () => {
+        const core: Record<string, unknown> = fullCoreMock();
+        for (const k of missing) delete core[k];
+        return core;
+      });
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      mod = require('../srv/bridge');
+    });
+  } finally {
+    jest.doMock('@odatano/core', () => fullCoreMock());
+  }
+  return mod!;
+}
+
+function codeOf(fn: () => unknown): string | undefined {
+  try {
+    fn();
+  } catch (e) {
+    return (e as { code?: string }).code;
+  }
+  return undefined;
+}
 
 // `bridge` uses a module-level init cache. We must `isolateModules` per
 // test so the cache resets, otherwise an earlier successful init makes
@@ -50,6 +97,12 @@ beforeEach(() => {
   mockInitialize.mockReset();
   mockShutdown.mockReset();
   mockParseTransaction.mockReset();
+  mockPosixToSlot.mockReset();
+  mockSlotToPosixMs.mockReset();
+  mockApplyScriptParameters.mockReset();
+  mockPlutusScriptHash.mockReset();
+  mockVerifyTxWitnesses.mockReset();
+  mockGetStatus.mockReset();
   mockInitialize.mockResolvedValue(undefined);
   mockShutdown.mockResolvedValue(undefined);
 });
@@ -244,6 +297,150 @@ describe('submitTransaction', () => {
   });
 });
 
+describe('trySubmit', () => {
+  /** An error as core's backends throw it. */
+  const backendError = (statusCode: number, message = `status ${statusCode}`) =>
+    Object.assign(new Error(message), { statusCode });
+  /** core's error when every backend failed, carrying the single failures. */
+  const allFailed = (...statusCodes: number[]) =>
+    Object.assign(new Error('all backends failed'), { statusCode: 503, errors: statusCodes.map(c => backendError(c)) });
+
+  it('is accepted when the backend takes the transaction', async () => {
+    const bridge = loadBridge();
+    mockClient.submitTransaction.mockResolvedValue('ab'.repeat(32));
+    await expect(bridge.trySubmit('cafebabe')).resolves.toEqual({ kind: 'accepted' });
+    expect(mockClient.submitTransaction).toHaveBeenCalledWith('cafebabe');
+  });
+
+  it('is accepted when the backend already has it (409)', async () => {
+    const bridge = loadBridge();
+    mockClient.submitTransaction.mockRejectedValue(backendError(409, 'already exists in mempool or on chain'));
+    await expect(bridge.trySubmit('cafebabe')).resolves.toEqual({ kind: 'accepted' });
+  });
+
+  it('is accepted when one of the backends already has it', async () => {
+    const bridge = loadBridge();
+    mockClient.submitTransaction.mockRejectedValue(allFailed(503, 409));
+    await expect(bridge.trySubmit('cafebabe')).resolves.toEqual({ kind: 'accepted' });
+  });
+
+  it.each([400, 422])('is rejected on a %d from the backend', async (status) => {
+    const bridge = loadBridge();
+    mockClient.submitTransaction.mockRejectedValue(backendError(status, 'BadInputsUTxO'));
+    await expect(bridge.trySubmit('cafebabe')).resolves.toEqual({ kind: 'rejected', reason: 'BadInputsUTxO' });
+  });
+
+  it('is rejected when every backend rejected it', async () => {
+    const bridge = loadBridge();
+    mockClient.submitTransaction.mockRejectedValue(allFailed(400, 422));
+    await expect(bridge.trySubmit('cafebabe')).resolves.toMatchObject({ kind: 'rejected' });
+  });
+
+  it.each([429, 500, 503])('is unknown on a %d from the backend', async (status) => {
+    const bridge = loadBridge();
+    mockClient.submitTransaction.mockRejectedValue(backendError(status));
+    await expect(bridge.trySubmit('cafebabe')).resolves.toEqual({ kind: 'unknown', reason: `status ${status}` });
+  });
+
+  it('is unknown on a timeout or an error without a status', async () => {
+    const bridge = loadBridge();
+    mockClient.submitTransaction.mockRejectedValue(new Error('socket hang up'));
+    await expect(bridge.trySubmit('cafebabe')).resolves.toEqual({ kind: 'unknown', reason: 'socket hang up' });
+    mockClient.submitTransaction.mockRejectedValue('timeout');
+    await expect(bridge.trySubmit('cafebabe')).resolves.toEqual({ kind: 'unknown', reason: 'timeout' });
+  });
+
+  it('is unknown when only some backends rejected it', async () => {
+    const bridge = loadBridge();
+    mockClient.submitTransaction.mockRejectedValue(allFailed(400, 503));
+    await expect(bridge.trySubmit('cafebabe')).resolves.toMatchObject({ kind: 'unknown' });
+  });
+
+  it('is unknown when no backend was called at all', async () => {
+    const bridge = loadBridge();
+    mockClient.submitTransaction.mockRejectedValue(allFailed());
+    await expect(bridge.trySubmit('cafebabe')).resolves.toMatchObject({ kind: 'unknown' });
+  });
+
+  it('cuts a long reason to 300 chars', async () => {
+    const bridge = loadBridge();
+    mockClient.submitTransaction.mockRejectedValue(backendError(400, 'x'.repeat(1000)));
+    const r = await bridge.trySubmit('cafebabe');
+    expect(r).toMatchObject({ kind: 'rejected' });
+    if (r.kind === 'rejected') expect(r.reason).toHaveLength(300);
+  });
+
+  it('is unknown for an empty transaction, without calling the backend', async () => {
+    const bridge = loadBridge();
+    await expect(bridge.trySubmit('')).resolves.toMatchObject({ kind: 'unknown' });
+    expect(mockClient.submitTransaction).not.toHaveBeenCalled();
+  });
+});
+
+describe('getBackendNetwork', () => {
+  it('prefixes the network core is connected to', async () => {
+    const bridge = loadBridge();
+    mockGetStatus.mockReturnValue({ initialized: true, network: 'preview' });
+    await expect(bridge.getBackendNetwork()).resolves.toBe('cardano:preview');
+    expect(mockInitialize).toHaveBeenCalledTimes(1);
+  });
+
+  it('is null when core reports no network', async () => {
+    const bridge = loadBridge();
+    mockGetStatus.mockReturnValue({ initialized: false });
+    await expect(bridge.getBackendNetwork()).resolves.toBeNull();
+  });
+});
+
+describe('createdOutputs', () => {
+  const out = (outputIndex: number, isCollateral?: boolean) => ({
+    address: 'addr_test1x', amount: [{ unit: 'lovelace', quantity: '1000000' }], outputIndex,
+    ...(isCollateral !== undefined ? { isCollateral } : {}),
+  });
+  const tx = (outputs: ReturnType<typeof out>[], spendsCollaterals?: boolean) => ({
+    hash: 'ab'.repeat(32), blockHeight: 1, blockTime: 1, outputs,
+    ...(spendsCollaterals !== undefined ? { spendsCollaterals } : {}),
+  });
+
+  it('returns the regular outputs of a valid tx, without the collateral return', () => {
+    const bridge = loadBridge();
+    const created = bridge.createdOutputs(tx([out(0), out(1, false), out(2, true)]));
+    expect(created.map(o => o.outputIndex)).toEqual([0, 1]);
+  });
+
+  it('treats a tx without the flag, or with it false, as valid', () => {
+    const bridge = loadBridge();
+    expect(bridge.createdOutputs(tx([out(0), out(1, true)], false)).map(o => o.outputIndex)).toEqual([0]);
+    expect(bridge.createdOutputs(tx([out(0)])).map(o => o.outputIndex)).toEqual([0]);
+  });
+
+  it('returns only the collateral return of a failed-script tx', () => {
+    const bridge = loadBridge();
+    const created = bridge.createdOutputs(tx([out(0), out(1), out(2, true)], true));
+    expect(created.map(o => o.outputIndex)).toEqual([2]);
+  });
+
+  it('returns nothing for a failed-script tx without a collateral return', () => {
+    const bridge = loadBridge();
+    expect(bridge.createdOutputs(tx([out(0)], true))).toEqual([]);
+  });
+});
+
+describe('verifyTxWitnesses', () => {
+  it('forwards to core', () => {
+    const bridge = loadBridge();
+    const result = { valid: true, txBodyHash: 'ab'.repeat(32), signerKeyHashes: ['5c'.repeat(28)], errors: [] };
+    mockVerifyTxWitnesses.mockReturnValue(result);
+    expect(bridge.verifyTxWitnesses('cafebabe')).toBe(result);
+    expect(mockVerifyTxWitnesses).toHaveBeenCalledWith('cafebabe');
+  });
+
+  it('throws BRIDGE_UNAVAILABLE when core lacks it', () => {
+    const bridge = loadBridgeWithout(['verifyTxWitnesses']);
+    expect(codeOf(() => bridge.verifyTxWitnesses('cafebabe'))).toBe(Codes.BRIDGE_UNAVAILABLE);
+  });
+});
+
 describe('isUtxoUnspent', () => {
   it('throws when txHash is empty', async () => {
     const bridge = loadBridge();
@@ -284,7 +481,7 @@ describe('parseTransaction', () => {
       bridge.parseTransaction('deadbeef');
       throw new Error('expected throw');
     } catch (e) {
-      expect((e as { code?: string }).code).toBe('invalid_cbor');
+      expect((e as { code?: string }).code).toBe(Codes.INVALID_CBOR);
       expect((e as Error).message).toMatch(/bad cbor/);
     }
   });
@@ -306,17 +503,11 @@ describe('parseTransaction', () => {
           bridge.parseTransaction('cafe');
           throw new Error('expected throw');
         } catch (e) {
-          expect((e as { code?: string }).code).toBe('bridge_unavailable');
+          expect((e as { code?: string }).code).toBe(Codes.BRIDGE_UNAVAILABLE);
         }
       });
     } finally {
-      jest.doMock('@odatano/core', () => ({
-        initialize:          (...a: unknown[]) => mockInitialize(...a),
-        shutdown:            (...a: unknown[]) => mockShutdown(...a),
-        getCardanoClient:    () => mockClient,
-        getCardanoTxBuilder: () => mockTxBuilder,
-        parseTransaction:    (...a: unknown[]) => mockParseTransaction(...a),
-      }));
+      jest.doMock('@odatano/core', () => fullCoreMock());
     }
   });
 });
@@ -360,5 +551,70 @@ describe('buildUnsignedTransfer', () => {
     await bridge.buildUnsignedTransfer(req);
     expect(mockTxBuilder.buildSimpleAdaTransaction).toHaveBeenCalled();
     expect(mockTxBuilder.buildMultiAssetTransaction).not.toHaveBeenCalled();
+  });
+});
+
+describe('getFeeParameters', () => {
+  it('maps the fee and min-UTxO parameters to bigint', async () => {
+    const bridge = loadBridge();
+    mockClient.getProtocolParameters.mockResolvedValue({ minFeeA: 44, minFeeB: 155381, coinsPerUtxoSize: '4310' });
+    await expect(bridge.getFeeParameters()).resolves.toEqual({
+      minFeeA: 44n, minFeeB: 155381n, coinsPerUtxoByte: 4310n,
+    });
+  });
+
+  it('reports a missing coinsPerUtxoSize as null', async () => {
+    const bridge = loadBridge();
+    mockClient.getProtocolParameters.mockResolvedValue({ minFeeA: 44, minFeeB: 155381, coinsPerUtxoSize: null });
+    expect((await bridge.getFeeParameters()).coinsPerUtxoByte).toBeNull();
+  });
+});
+
+describe('getTipHeight', () => {
+  it('returns the tip block height', async () => {
+    const bridge = loadBridge();
+    mockClient.getLatestBlock.mockResolvedValue({ height: 4730334 });
+    await expect(bridge.getTipHeight()).resolves.toBe(4730334);
+  });
+
+  it('throws BRIDGE_UNAVAILABLE when the backend reports no height', async () => {
+    const bridge = loadBridge();
+    mockClient.getLatestBlock.mockResolvedValue({ height: null });
+    await expect(bridge.getTipHeight()).rejects.toMatchObject({ code: Codes.BRIDGE_UNAVAILABLE });
+  });
+});
+
+describe('posixToSlot / slotToPosixMs', () => {
+  it('passes the network without the cardano: prefix', () => {
+    const bridge = loadBridge();
+    mockPosixToSlot.mockReturnValue(123);
+    mockSlotToPosixMs.mockReturnValue(456);
+    expect(bridge.posixToSlot('cardano:preview', 1_700_000_000_000)).toBe(123);
+    expect(mockPosixToSlot).toHaveBeenCalledWith('preview', 1_700_000_000_000);
+    expect(bridge.slotToPosixMs('cardano:mainnet', 99)).toBe(456);
+    expect(mockSlotToPosixMs).toHaveBeenCalledWith('mainnet', 99);
+  });
+
+  it('throws BRIDGE_UNAVAILABLE when core lacks them', () => {
+    const bridge = loadBridgeWithout(['posixToSlot', 'slotToPosixMs']);
+    expect(codeOf(() => bridge.posixToSlot('cardano:preview', 0))).toBe(Codes.BRIDGE_UNAVAILABLE);
+    expect(codeOf(() => bridge.slotToPosixMs('cardano:preview', 0))).toBe(Codes.BRIDGE_UNAVAILABLE);
+  });
+});
+
+describe('applyScriptParameters / plutusScriptHash', () => {
+  it('forward to core', () => {
+    const bridge = loadBridge();
+    mockApplyScriptParameters.mockReturnValue('ccdd');
+    mockPlutusScriptHash.mockReturnValue('5c'.repeat(28));
+    expect(bridge.applyScriptParameters('aabb', [{ int: '42' }])).toBe('ccdd');
+    expect(mockApplyScriptParameters).toHaveBeenCalledWith('aabb', [{ int: '42' }]);
+    expect(bridge.plutusScriptHash('ccdd', 'plutusV3')).toBe('5c'.repeat(28));
+  });
+
+  it('throw BRIDGE_UNAVAILABLE when core lacks them', () => {
+    const bridge = loadBridgeWithout(['applyScriptParameters', 'plutusScriptHash']);
+    expect(codeOf(() => bridge.applyScriptParameters('aabb', []))).toBe(Codes.BRIDGE_UNAVAILABLE);
+    expect(codeOf(() => bridge.plutusScriptHash('aabb', 'plutusV3'))).toBe(Codes.BRIDGE_UNAVAILABLE);
   });
 });

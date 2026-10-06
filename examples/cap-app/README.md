@@ -52,22 +52,26 @@ curl -s -X POST http://localhost:4004/odata/v4/prices/getBestPrice \
 
 The 402 response body looks like:
 
+The `PAYMENT-REQUIRED` header (base64) carries, and the body repeats:
+
 ```json
 {
   "x402Version": 2,
   "error": "PAYMENT-SIGNATURE header is required",
+  "resource": {
+    "url": "/odata/v4/prices/Quotes",
+    "description": "Example: synthetic price feed",
+    "mimeType": "application/json",
+    "serviceName": "ODATANO price feed"
+  },
   "accepts": [{
     "scheme": "exact",
     "network": "cardano:preprod",
     "asset": "lovelace",
     "amount": "1000000",
     "payTo": "addr_test1qqetxfc...",
-    "resource": {
-      "url": "/odata/v4/prices/Quotes",
-      "description": "Example: synthetic price feed",
-      "mimeType": "application/json"
-    },
-    "maxTimeoutSeconds": 600
+    "maxTimeoutSeconds": 600,
+    "extra": { "areFeesSponsored": false }
   }]
 }
 ```
@@ -81,8 +85,8 @@ Use one of the buyer examples against this seller:
 - [`examples/browser-buyer`](../browser-buyer/), CIP-30 wallet in the browser
 
 Rolling your own: build an unsigned tx with `buildUnsignedPaymentTx`, sign it,
-base64-encode the signed CBOR + nonce-UTxO ref into a `PAYMENT-SIGNATURE`
-header, and retry. On success: `200 OK` + `X-PAYMENT-RESPONSE` header.
+encode it with `encodePaymentPayload` into a `PAYMENT-SIGNATURE` header, and
+retry. On success: `200 OK` + `PAYMENT-RESPONSE` header.
 
 ## Seller-side accounting
 

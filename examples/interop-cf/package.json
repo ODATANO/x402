@@ -1,0 +1,28 @@
+{
+  "name": "@odatano/x402-example-interop-cf",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Live interop checks on Cardano preview between @odatano/x402 and the @x402/cardano reference implementation, in all four directions.",
+  "scripts": {
+    "fund": "tsx fund.ts",
+    "check": "tsx check.ts"
+  },
+  "dependencies": {
+    "@harmoniclabs/buildooor": "^0.2.6",
+    "@odatano/core": "2.0.0-rc.34",
+    "@odatano/x402": "*",
+    "@sap/cds": "^9",
+    "@scure/bip39": "^1.6.0",
+    "@x402/cardano": "2.28.0",
+    "@x402/core": "2.28.0",
+    "@x402/express": "2.28.0",
+    "@x402/fetch": "2.28.0",
+    "express": "^4"
+  },
+  "devDependencies": {
+    "@types/express": "^4",
+    "@types/node": "^22",
+    "tsx": "^4",
+    "typescript": "^5"
+  }
+}

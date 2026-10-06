@@ -1,37 +1,43 @@
 /**
- * Build PAYMENT-SIGNATURE envelopes (v2 wire format) for tests.
- *
- * Mirror of the shape consumed by `srv/core/decode.ts`. The base64
- * step matters: `srv/core/decode.ts` rejects malformed base64 strictly,
- * so the fixture must produce canonical base64 too.
+ * Build `PAYMENT-SIGNATURE` values (x402 v2 `PaymentPayload`) for tests.
+ * The base64 must be canonical: `parsePaymentPayload` rejects anything else.
  */
 
-export interface EnvelopeArgs {
+import type { PaymentRequirements, ResourceInfo } from '../../srv/core/types';
+
+export interface PaymentSignatureArgs {
+  /** The `accepts[]` entry the buyer pays, verbatim. */
+  accepted: PaymentRequirements;
   txCborHex: string;
-  nonceRef: string;                   // '<txHash>#<index>'
-  network?: string;                   // default 'cardano:preprod'
-  x402Version?: number;               // default 2
-  scheme?: string;                    // default 'exact'
-  /** Allows test cases to corrupt specific fields. */
+  /** '<txHash>#<index>' */
+  nonceRef: string;
+  resource?: ResourceInfo;
+  extensions?: Record<string, unknown>;
+  /** Top-level fields to add or replace, for corruption tests. */
   overrides?: Record<string, unknown>;
 }
 
-export function buildEnvelope(args: EnvelopeArgs): string {
-  const txB64 = Buffer.from(args.txCborHex, 'hex').toString('base64');
-  const env = {
-    x402Version: args.x402Version ?? 2,
-    scheme:      args.scheme ?? 'exact',
-    network:     args.network ?? 'cardano:preprod',
+export function buildPaymentSignature(args: PaymentSignatureArgs): string {
+  const payload = {
+    x402Version: 2,
+    ...(args.resource ? { resource: args.resource } : {}),
+    accepted: args.accepted,
     payload: {
-      transaction: txB64,
+      transaction: Buffer.from(args.txCborHex, 'hex').toString('base64'),
       nonce:       args.nonceRef,
     },
+    ...(args.extensions ? { extensions: args.extensions } : {}),
     ...args.overrides,
   };
-  return Buffer.from(JSON.stringify(env), 'utf8').toString('base64');
+  return encodeRawPayload(payload);
 }
 
-/** Encode an arbitrary JSON-like object as a PAYMENT-SIGNATURE value. */
-export function encodeRawEnvelope(obj: unknown): string {
+/** Encode any JSON value as a `PAYMENT-SIGNATURE` (or other x402 header) value. */
+export function encodeRawPayload(obj: unknown): string {
   return Buffer.from(JSON.stringify(obj), 'utf8').toString('base64');
+}
+
+/** Decode a base64 JSON header value. */
+export function decodeHeader<T = unknown>(value: string | undefined | null): T {
+  return JSON.parse(Buffer.from(String(value), 'base64').toString('utf8')) as T;
 }

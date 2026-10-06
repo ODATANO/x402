@@ -60,7 +60,7 @@ If your gated server is on a different origin, it needs to allow:
 
 - `Access-Control-Allow-Origin: <your-frontend-origin>`
 - `Access-Control-Allow-Headers: PAYMENT-SIGNATURE, X-PAYMENT-GRANT, Content-Type`
-- `Access-Control-Expose-Headers: X-PAYMENT-RESPONSE, X-PAYMENT-GRANT, X-PAYMENT-GRANT-EXPIRES`
+- `Access-Control-Expose-Headers: PAYMENT-REQUIRED, PAYMENT-RESPONSE, X-PAYMENT-GRANT, X-PAYMENT-GRANT-EXPIRES`
 
-Otherwise the browser will block the `PAYMENT-SIGNATURE` header from
-ever being sent.
+Otherwise the browser blocks the `PAYMENT-SIGNATURE` header, or hides
+`PAYMENT-REQUIRED` from the client so it cannot read the price.

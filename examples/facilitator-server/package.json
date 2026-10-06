@@ -7,7 +7,7 @@
     "start": "tsx server.ts"
   },
   "dependencies": {
-    "@odatano/core": "2.0.0-rc.31",
+    "@odatano/core": "2.0.0-rc.34",
     "@odatano/x402": "*",
     "@sap/cds": "^9",
     "express": "^4"

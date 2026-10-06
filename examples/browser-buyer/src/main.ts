@@ -23,7 +23,7 @@
 // would drag @sap/cds and express into the browser bundle.
 import { x402Fetch } from '@odatano/x402/srv/client/fetch';
 import { X402PaymentError } from '@odatano/x402/srv/client/errors';
-import type { PaymentRequirementEntry } from '@odatano/x402';
+import type { PaymentRequirements } from '@odatano/x402';
 
 // ─── CIP-30 wallet type (minimal subset we use) ──────────────────────────
 
@@ -93,7 +93,7 @@ $<HTMLButtonElement>('#connect').onclick = async () => {
 
 // ─── PayHandler: unsigned-from-server, signed-by-wallet ───────────────────
 
-async function buildAndSign(requirement: PaymentRequirementEntry): Promise<{
+async function buildAndSign(requirement: PaymentRequirements): Promise<{
   signedTxCborHex: string;
   nonceRef: string;
 }> {
@@ -124,7 +124,7 @@ async function buildAndSign(requirement: PaymentRequirementEntry): Promise<{
 const paidFetch = x402Fetch({
   pay:            buildAndSign,
   errorOnFailure: true,
-  // Optional: pick a specific accepts[] entry. Default picks the first
+  // Optional: pick a specific accepts[] entry. Default: the first supported one
   // (typically ADA in this codebase's multi-accept). Switch to a token
   // entry if your wallet is funded that way:
   // selectAccepts: (a) => a.find(x => x.asset.includes('.0014df105553444d')) ?? a[0],

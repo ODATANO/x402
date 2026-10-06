@@ -1,57 +1,59 @@
 /**
- * Validate a decoded payment against payment requirements.
+ * Structural verification rules of Cardano `exact` that need no chain
+ * calls. Pure.
  *
- * Implements the **6 mandatory facilitator checks** from
- * Cardano-x402-v2:
+ *   1. Network: body network id and every Shelley output address match the requirement
+ *   2. Recipient: at least one output to `payTo`
+ *   3. Amount: one output to `payTo` carries at least `amount` of `asset`
+ *   4. Asset: policy and name match exactly
+ *   5. Nonce: the nonce UTxO is a tx input (unspent check: facilitator/chain.ts)
+ *   6. Phase-1 parts without chain data: valid vkey signatures, nothing the
+ *      inputs and outputs do not show (mint, withdrawals, certificates,
+ *      governance, donation), validity start reached
+ *   7. TTL: present, not passed, not beyond `maxTtlSlot`
  *
- *   1. Network validation
- *   2. Recipient verification          , ≥1 output to payTo
- *   3. Amount verification             , sum of payTo outputs for asset ≥ required
- *   4. Asset verification              , exact policy + name match
- *   5. Nonce / replay prevention
- *      - 5a. UTxO referenced by `payload.nonce` appears as a tx input
- *      - 5b. that UTxO is still unspent on chain  ← chain-touching, lives in `nonce.ts`
- *   6. TTL / expiry                    , tx.validity_range.upper_bound in future
- *
- * For `assetTransferMethod: 'script'` it also binds `payTo` to the declared
- * script (see `transfer.ts`). Other methods are rejected.
- *
- * This module covers (1), (2), (3), (4), (5a) and (6). The chain-touching
- * part of (5), checking the UTxO is unspent, and (5b) live in
- * `facilitator/nonce.ts` and run after this. We also keep a sanity guard
- * for "no vkey witnesses" so an unsigned CBOR is rejected with a precise
- * code rather than blowing up at submit time.
- *
- * Pure function. No I/O.
+ * `script` transfers additionally bind `payTo` to the declared script
+ * (`transfer.ts`). Other transfer methods are rejected. Value
+ * conservation, the fee floor, min-UTxO and the unspent checks need chain
+ * data and run in the facilitator.
  */
 
 import { Codes, type X402Code } from './errors';
-import { networksMatch } from './network';
+import { addressNetworkId, normalizeNetwork } from './network';
 import { parseAsset } from './asset';
 import { verifyScriptTransfer } from './transfer';
 import { isScriptExtra, isSupportedTransferMethod, transferMethodOf } from './transfer-method';
+import { addressNetworkIdOf } from '../helpers/address';
 import type {
-  DecodedPayment,
   DecodedOutput,
-  PaymentRequirementEntry,
-  PaymentRequirementsBody,
+  DecodedPayment,
   PaymentClaim,
-  Network,
+  PaymentRequirements,
+  ScriptClaimExtra,
 } from './types';
 
+/** What the matched output proves about the payment. */
+export interface PaymentMatch {
+  /** Amount of `asset` the matched `payTo` output carries, atomic units. */
+  amountUnits: string;
+  /** `policyId+nameHex`; empty for lovelace. */
+  unit: string;
+  extra?: ScriptClaimExtra;
+}
+
 export type ValidationResult =
-  | { ok: true; claim: PaymentClaim }
+  | { ok: true; match: PaymentMatch }
   | { ok: false; code: X402Code; reason: string };
 
 export interface ValidateOptions {
-  /** Required: current slot, for TTL upper-bound check. */
   currentSlot: number;
+  /** Latest TTL slot allowed (now + `maxTimeoutSeconds`); unset skips the upper bound. */
+  maxTtlSlot?: number;
   /**
-   * If true, allow tx with no `ttl()` set (validity-range upper bound
-   * absent). Default false, v2 spec recommends a TTL. Callers that
-   * want to accept no-TTL txs (e.g. legacy wallets) opt-in.
+   * The ledger already accepted this transaction (pending-settlement
+   * retry): the TTL and validity start no longer gate it.
    */
-  allowNoTtl?: boolean;
+  alreadyAccepted?: boolean;
 }
 
 function quantityOf(output: DecodedOutput, isLovelace: boolean, unit: string): bigint {
@@ -60,247 +62,155 @@ function quantityOf(output: DecodedOutput, isLovelace: boolean, unit: string): b
   return a ? BigInt(a.quantity) : 0n;
 }
 
-/**
- * Total amount of `unit` paid to `payTo`, summed across ALL matching
- * outputs. Summing is correct: a wallet may split a payment across
- * multiple outputs (e.g. token + change), and we credit the full amount
- * sent to our address.
- */
-function totalPaid(
-  decoded: DecodedPayment,
-  payTo: string,
-  isLovelace: boolean,
-  unit: string,
-): { total: bigint; anyOutputToRecipient: boolean } {
-  let total = 0n;
-  let anyOutputToRecipient = false;
-  for (const o of decoded.outputs) {
-    if (o.address !== payTo) continue;
-    anyOutputToRecipient = true;
-    total += quantityOf(o, isLovelace, unit);
-  }
-  return { total, anyOutputToRecipient };
+function fail(code: X402Code, reason: string): ValidationResult {
+  return { ok: false, code, reason };
 }
 
 export function validatePayment(
   decoded: DecodedPayment,
-  requirements: PaymentRequirementEntry,
+  requirements: PaymentRequirements,
   opts: ValidateOptions,
 ): ValidationResult {
-  // ─── Sanity: witness present ───────────────────────────────────────
-  // An unsigned CBOR can't be submitted. Catch this here with a precise
-  // code rather than letting the submit step fail with a generic 400.
   if (!decoded.vkeyWitnessCount || decoded.vkeyWitnessCount < 1) {
-    return {
-      ok: false,
-      code: Codes.UNSIGNED_TRANSACTION,
-      reason: 'transaction has no vkey witnesses',
-    };
+    return fail(Codes.UNSIGNED_TRANSACTION, 'transaction has no vkey witnesses');
   }
-
-  // ─── Check 1: network ──────────────────────────────────────────────
-  if (!networksMatch(decoded.envelope.network, requirements.network)) {
-    return {
-      ok: false,
-      code: Codes.NETWORK_MISMATCH,
-      reason: `payment network '${decoded.envelope.network}' does not match requirements '${requirements.network}'`,
-    };
+  if (!decoded.isValid) {
+    return fail(Codes.PHASE2_INVALID, 'transaction is marked invalid: its outputs would never exist');
+  }
+  if (decoded.witnessErrors.length > 0) {
+    return fail(Codes.INVALID_SIGNATURE, decoded.witnessErrors.join('; '));
   }
 
   const method = transferMethodOf(requirements);
   if (!isSupportedTransferMethod(method)) {
-    return {
-      ok: false,
-      code: Codes.UNSUPPORTED_METHOD,
-      reason: `assetTransferMethod '${method}' is not supported`,
-    };
+    return fail(Codes.UNSUPPORTED_METHOD, `assetTransferMethod '${method}' is not supported`);
   }
 
-  // Parse the asset string once, also normalises the requirement's
-  // unit key for output comparison.
-  const parsed = parseAsset(requirements.asset);
-  const unit = parsed.unit; // empty when lovelace; checks short-circuit via isLovelace
-  const required = BigInt(requirements.amount);
-
-  const { total: paid, anyOutputToRecipient } = totalPaid(
-    decoded, requirements.payTo, parsed.isLovelace, unit,
-  );
-
-  // ─── Check 2: recipient ────────────────────────────────────────────
-  if (!anyOutputToRecipient) {
-    return {
-      ok: false,
-      code: Codes.WRONG_RECIPIENT,
-      reason: `no output to payTo address ${requirements.payTo}`,
-    };
+  // ─── Rule 1: network ───────────────────────────────────────────────
+  const network = normalizeNetwork(requirements.network);
+  if (!network) return fail(Codes.INVALID_NETWORK_FORMAT, `network '${String(requirements.network)}' is not a Cardano network`);
+  const networkId = addressNetworkId(network);
+  if (decoded.networkId !== null && decoded.networkId !== networkId) {
+    return fail(Codes.NETWORK_MISMATCH, `transaction body is for network id ${decoded.networkId}, not ${requirements.network}`);
+  }
+  const foreign = decoded.outputs.find(o => {
+    const id = addressNetworkIdOf(o.address);
+    return id !== null && id !== networkId;
+  });
+  if (foreign) {
+    return fail(Codes.NETWORK_MISMATCH, `output ${foreign.outputIndex} is not on ${requirements.network}`);
   }
 
-  // ─── Script transfer: payTo is the declared script ─────────────────
-  let scriptResult: ReturnType<typeof verifyScriptTransfer> | undefined;
-  if (isScriptExtra(requirements.extra)) {
-    scriptResult = verifyScriptTransfer(decoded, requirements, requirements.extra);
-    if (!scriptResult.ok) return scriptResult;
-  }
+  // ─── Rules 2-4 and script binding ──────────────────────────────────
+  const matched = matchOutput(decoded, requirements);
+  if (!matched.ok) return matched;
 
-  // ─── Check 4: asset (run before amount so amount=0 reports as
-  //              WRONG_ASSET rather than INSUFFICIENT_AMOUNT) ─────────
-  if (paid === 0n) {
-    return {
-      ok: false,
-      code: Codes.WRONG_ASSET,
-      reason: `outputs to payTo do not contain asset ${requirements.asset}`,
-    };
-  }
-
-  // ─── Check 3: amount ───────────────────────────────────────────────
-  if (paid < required) {
-    return {
-      ok: false,
-      code: Codes.INSUFFICIENT_AMOUNT,
-      reason: `paid ${paid.toString()} < required ${required.toString()} of asset ${requirements.asset}`,
-    };
-  }
-
-  // ─── Check 5a: nonce UTxO appears in tx inputs ─────────────────────
-  // (5b, UTxO is unspent, runs in facilitator/nonce.ts after we've
-  // confirmed the buyer's structural intent here.)
+  // ─── Rule 5: nonce is an input ─────────────────────────────────────
   const nonceInInputs = decoded.inputs.some(
     i => i.txHash === decoded.nonce.txHash && i.outputIndex === decoded.nonce.index,
   );
   if (!nonceInInputs) {
-    return {
-      ok: false,
-      code: Codes.NONCE_NOT_REFERENCED,
-      reason: `nonce UTxO ${decoded.nonce.txHash}#${decoded.nonce.index} is not referenced as a tx input`,
-    };
+    return fail(
+      Codes.NONCE_NOT_REFERENCED,
+      `nonce UTxO ${decoded.nonce.txHash}#${decoded.nonce.index} is not a tx input`,
+    );
   }
 
-  // ─── Check 6: TTL / expiry ─────────────────────────────────────────
-  // Slot semantics: `ttl_bignum` is the FIRST slot at which the tx is
-  // INVALID, so the tx must be submitted before that slot. We require
-  // `currentSlot < ttlSlot`; equality means the window just closed.
+  // ─── Rule 6 (chain-free part): nothing the inputs and outputs do not show ──
+  if (decoded.mint.length > 0) {
+    return fail(Codes.PHASE1_INVALID, 'transaction mints or burns assets');
+  }
+  if (decoded.extraBodyContent.length > 0) {
+    return fail(Codes.PHASE1_INVALID, `transaction carries ${decoded.extraBodyContent.join(', ')}`);
+  }
+
+  // ─── Rule 7: validity window ───────────────────────────────────────
+  // `ttlSlot` is the first slot at which the tx is invalid.
   if (decoded.ttlSlot === null) {
-    if (!opts.allowNoTtl) {
-      return {
-        ok: false,
-        code: Codes.EXPIRED_TTL,
-        reason: 'transaction has no validity-range upper bound (ttl); set one or call with allowNoTtl=true',
-      };
+    return fail(Codes.EXPIRED_TTL, 'transaction has no validity-range upper bound (ttl)');
+  }
+  if (!opts.alreadyAccepted) {
+    if (opts.currentSlot >= decoded.ttlSlot) {
+      return fail(Codes.EXPIRED_TTL, `ttl ${decoded.ttlSlot} already passed (current slot ${opts.currentSlot})`);
     }
-  } else if (opts.currentSlot >= decoded.ttlSlot) {
-    return {
-      ok: false,
-      code: Codes.EXPIRED_TTL,
-      reason: `ttl ${decoded.ttlSlot} already passed (current slot ${opts.currentSlot})`,
-    };
+    if (decoded.validityStartSlot !== null && decoded.validityStartSlot > opts.currentSlot) {
+      return fail(
+        Codes.NOT_YET_VALID,
+        `validity starts at slot ${decoded.validityStartSlot} (current slot ${opts.currentSlot})`,
+      );
+    }
+    if (opts.maxTtlSlot !== undefined && decoded.ttlSlot > opts.maxTtlSlot) {
+      return fail(
+        Codes.TTL_TOO_FAR,
+        `ttl ${decoded.ttlSlot} is beyond now + maxTimeoutSeconds (slot ${opts.maxTtlSlot})`,
+      );
+    }
   }
 
-  // ─── All structural checks pass ────────────────────────────────────
-  // `payerAddr` is not known here: it is the address of the nonce UTxO,
-  // which needs a chain read. The facilitator fills it in after the nonce
-  // check (srv/facilitator/payer.ts).
-  const network = requirements.network as Network;
+  return matched;
+}
+
+/**
+ * Rules 2-4 plus the script binding: the `payTo` output that pays the
+ * requirement. Pure; the middleware uses it to build the claim.
+ */
+export function matchOutput(decoded: DecodedPayment, requirements: PaymentRequirements): ValidationResult {
+  const parsed = parseAsset(requirements.asset);
+  const required = BigInt(requirements.amount);
+  const toPayTo = decoded.outputs.filter(o => o.address === requirements.payTo);
+  if (toPayTo.length === 0) {
+    return fail(Codes.WRONG_RECIPIENT, `no output to payTo ${requirements.payTo}`);
+  }
+  const quantity = (o: DecodedOutput) => quantityOf(o, parsed.isLovelace, parsed.unit);
+  const best = toPayTo.map(quantity).reduce((a, b) => (b > a ? b : a));
+  if (best === 0n) {
+    return fail(Codes.WRONG_ASSET, `no output to payTo carries asset ${requirements.asset}`);
+  }
+  if (best < required) {
+    return fail(
+      Codes.INSUFFICIENT_AMOUNT,
+      `largest output to payTo carries ${best.toString()} < required ${required.toString()} of ${requirements.asset}`,
+    );
+  }
+  // Outputs to payTo that cover the amount alone, largest first.
+  const paying = toPayTo.filter(o => quantity(o) >= required).sort((a, b) => (quantity(b) > quantity(a) ? 1 : -1));
+
+  let paid = paying[0]!;
+  let scriptExtra: ScriptClaimExtra | undefined;
+  if (isScriptExtra(requirements.extra)) {
+    const r = verifyScriptTransfer(decoded, requirements, requirements.extra, paying);
+    if (!r.ok) return r;
+    scriptExtra = r.claimExtra;
+    paid = r.paidOutput;
+  }
   return {
     ok: true,
-    claim: {
-      txHash:      decoded.txHash,
-      amountUnits: paid.toString(),
-      network,
-      unit,
-      asset:       requirements.asset,
-      payTo:       requirements.payTo,
-      resourceUrl: requirements.resource.url,
-      nonceRef:    `${decoded.nonce.txHash}#${decoded.nonce.index}`,
-      ...(scriptResult?.ok ? { extra: scriptResult.claimExtra } : {}),
+    match: {
+      amountUnits: quantity(paid).toString(),
+      unit:        parsed.unit,
+      ...(scriptExtra ? { extra: scriptExtra } : {}),
     },
   };
 }
 
-// ─── Multi-accept selector ───────────────────────────────────────────────
-
-export type PickResult =
-  | { ok: true; entry: PaymentRequirementEntry }
-  | { ok: false; code: X402Code; reason: string };
-
-/**
- * Select the `accepts[]` entry the buyer actually paid against.
- *
- * Algorithm (first-match wins, accepts[] is the seller's preference order):
- *   1. Filter by network , the buyer's envelope declares one network and
- *      we discard entries that don't match.
- *   2. For each remaining entry, look for an output to `entry.payTo`
- *      containing `entry.asset` with quantity ≥ 1. We don't enforce the
- *      full `amount` here, that's `validatePayment`'s job, we just need
- *      enough signal to know *which* entry the buyer chose.
- *   3. First hit wins. No hit ⇒ `wrong_asset` with a composite reason.
- *
- * For a single-entry `accepts[]`, this returns `accepts[0]` if the
- * network matches, mirroring the pre-multi-accept behaviour exactly.
- */
-export function pickRequirement(
+/** The `PaymentClaim` of a verified payment. */
+export function buildClaim(
   decoded: DecodedPayment,
-  body: PaymentRequirementsBody,
-): PickResult {
-  if (!body.accepts || body.accepts.length === 0) {
-    return { ok: false, code: Codes.WRONG_ASSET, reason: 'PaymentRequirementsBody.accepts is empty' };
-  }
-
-  const networkOk = body.accepts.filter((e) =>
-    networksMatch(decoded.envelope.network, e.network),
-  );
-  if (networkOk.length === 0) {
-    return {
-      ok:     false,
-      code:   Codes.NETWORK_MISMATCH,
-      reason: `payment network '${decoded.envelope.network}' does not match any accepts[].network`,
-    };
-  }
-
-  // Single-entry shortcut: hand back the lone matching entry, the
-  // subsequent validatePayment will run the strict per-entry checks
-  // (recipient, amount, asset, ...) just as it did pre-multi-accept.
-  if (networkOk.length === 1) {
-    return { ok: true, entry: networkOk[0]! };
-  }
-
-  // Non-lovelace assets are an unambiguous signal: an output that
-  // carries policy X is paying in policy X. Lovelace is ambiguous,
-  // EVERY native-asset output to the seller also carries min-ADA in
-  // lovelace just to be valid on chain. So we pass over the accepts[]
-  // in two passes:
-  //   - Pass 1: match any entry whose non-lovelace asset appears in a
-  //     payTo output. Strong signal, accept immediately.
-  //   - Pass 2: only if no native-asset entry matched, consider
-  //     lovelace entries, and only against outputs that are pure ADA
-  //     (no native assets). That avoids charging a USDM-paying buyer
-  //     against a lovelace entry just because the min-ADA happened to
-  //     be in the output.
-  for (const entry of networkOk) {
-    const parsed = parseAsset(entry.asset);
-    if (parsed.isLovelace) continue;
-    const hit = decoded.outputs.some(
-      (o) => o.address === entry.payTo && o.assets.some((a) => a.unit === parsed.unit),
-    );
-    if (hit) return { ok: true, entry };
-  }
-  for (const entry of networkOk) {
-    const parsed = parseAsset(entry.asset);
-    if (!parsed.isLovelace) continue;
-    const hit = decoded.outputs.some(
-      (o) => o.address === entry.payTo && o.assets.length === 0 && BigInt(o.lovelace) > 0n,
-    );
-    if (hit) return { ok: true, entry };
-  }
-
-  // No entry matched. Compose a reason listing the (payTo, asset) pairs
-  // we expected, so the buyer's client can diagnose which option they
-  // tried to pay vs. what the server offered.
-  const expected = networkOk
-    .map((e) => `${e.asset}@${e.payTo}`)
-    .join(' | ');
+  requirements: PaymentRequirements,
+  match: PaymentMatch,
+  resourceUrl: string,
+  payerAddr?: string,
+): PaymentClaim {
   return {
-    ok:     false,
-    code:   Codes.WRONG_ASSET,
-    reason: `no accepts[] entry matched the paid (payTo, asset); expected one of: ${expected}`,
+    txHash:      decoded.txHash,
+    amountUnits: match.amountUnits,
+    network:     requirements.network,
+    unit:        match.unit,
+    asset:       requirements.asset,
+    payTo:       requirements.payTo,
+    resourceUrl,
+    nonceRef:    `${decoded.nonce.txHash}#${decoded.nonce.index}`,
+    ...(payerAddr ? { payerAddr } : {}),
+    ...(match.extra ? { extra: match.extra } : {}),
   };
 }

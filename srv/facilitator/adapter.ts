@@ -1,94 +1,101 @@
 /**
- * Facilitator adapter pattern.
+ * Facilitator interface of x402 v2 (§7): `verify` (read-only), `settle`
+ * (submit and confirm) and `supported` (discovery).
  *
- * In v0.1 the verify+settle pipeline was hard-wired into the middlewares
- *, they imported `process()` from `verify.ts` directly. That made it
- * impossible to swap the in-process facilitator for a hosted one
- * (the pattern Coinbase uses via `@coinbase/x402`).
- *
- * v0.2 introduces this `Facilitator` interface as the single
- * extension point. Two implementations ship in-box:
- *
- *   - `localFacilitator()` , runs verify+settle in-process via
- *                             `@odatano/core`. Default everywhere.
- *   - `httpFacilitator()`  , POSTs to a remote service (see
- *                             `srv/facilitator/http.ts` for the wire
- *                             format and `docs/facilitator-protocol.md`
- *                             for the protocol reference).
- *
- * Consumers wire their choice into the middleware:
- *
- *   x402Middleware({
- *     payTo, network, asset, priceUnits,
- *     facilitator: httpFacilitator({ url: 'https://...', apiKey }),
- *   });
- *
- * `verifyAndSettle` is the one mandatory operation, it covers the
- * entire 1.decode → 2.validate → 3.nonce → 4.settle → 5.onAccepted
- * pipeline. `supported()` is an optional discovery hook used by
- * tooling / health checks (no middleware path consumes it yet).
+ *   - `localFacilitator()` runs both in-process via `@odatano/core`.
+ *   - `httpFacilitator()` calls any x402 v2 facilitator over HTTP.
+ *   - `createFacilitatorRouter()` serves a facilitator over HTTP.
  */
 
-import { process as localProcess } from './verify';
-import type { ProcessArgs, ProcessResult } from './verify';
+import * as bridge from '../bridge';
+import { runVerify } from './verify';
+import { runSettle, type SettleContext } from './settle';
+import { memorySettlementStore, type SettlementStore } from './store';
 import { SUPPORTED_TRANSFER_METHODS } from '../core/transfer-method';
 import type {
-  AssetTransferMethod,
-  PaymentClaim,
-  PaymentRequirementsBody,
+  Network,
+  PaymentPayload,
+  PaymentRequirements,
+  SettlementResponse,
+  VerifyResponse,
 } from '../core/types';
 
-export interface FacilitatorVerifyAndSettleArgs {
-  /** Raw `PAYMENT-SIGNATURE` header value (string, array or undefined). */
-  paymentHeader: string | string[] | undefined;
-  /** 402 body the validator checks the payment against (`accepts[0]`). */
-  requirementsBody: PaymentRequirementsBody;
-  /** Settle poll budget (ms). Default 60_000. */
-  settlePollBudgetMs?: number;
-  /** Allow txs without a validity-range upper bound. Default false. */
-  allowNoTtl?: boolean;
-  /**
-   * Pending-retry grace window (ms). Default 300_000; 0 disables.
-   * See `ProcessArgs.pendingGraceMs` for semantics and trade-off.
-   */
-  pendingGraceMs?: number;
-  /**
-   * Best-effort audit callback. Invoked exactly once on `accepted`.
-   * **Not transmittable over HTTP**, the http facilitator wrapper
-   * invokes it locally after the remote call returns.
-   */
-  onAccepted?: (claim: PaymentClaim) => void | Promise<void>;
+export interface SupportedKind {
+  x402Version: 2;
+  scheme: string;
+  network: string;
+  extra?: Record<string, unknown>;
 }
 
-/** Identical to the legacy `ProcessResult`, kept as a type alias for now. */
-export type FacilitatorResult = ProcessResult;
-
-/** Discovery response, what this facilitator can handle. */
-export interface FacilitatorSupportedResult {
-  networks: string[];
-  assetTransferMethods: AssetTransferMethod[];
+/** The facilitator's `/supported` answer. */
+export interface SupportedResponse {
+  kinds: SupportedKind[];
+  extensions: string[];
+  /** CAIP-2 pattern → signer addresses. Empty: a Cardano facilitator signs nothing. */
+  signers: Record<string, string[]>;
 }
 
 export interface Facilitator {
-  verifyAndSettle(args: FacilitatorVerifyAndSettleArgs): Promise<FacilitatorResult>;
-  /** Optional discovery hook. May be omitted by minimal facilitators. */
-  supported?(): Promise<FacilitatorSupportedResult>;
+  verify(payload: PaymentPayload, requirements: PaymentRequirements): Promise<VerifyResponse>;
+  settle(payload: PaymentPayload, requirements: PaymentRequirements): Promise<SettlementResponse>;
+  supported?(): Promise<SupportedResponse>;
 }
 
+export interface LocalFacilitatorOptions {
+  /** default in-process store; share one store across instances serving the same payees */
+  store?: SettlementStore;
+  /** default 75_000; how long one settle waits for the required confirmations */
+  settlePollBudgetMs?: number;
+  /** default 3_000 */
+  pollIntervalMs?: number;
+  /** default 3_600_000; claim retention past the TTL */
+  claimGraceMs?: number;
+  /** default false; accept `l1Confirmations: -1` (broadcast acceptance only, can be rolled back) */
+  allowMempoolConfirmation?: boolean;
+}
+
+const NETWORKS: Network[] = ['cardano:mainnet', 'cardano:preprod', 'cardano:preview'];
+
+let shared: Facilitator | undefined;
+
 /**
- * Default in-process facilitator. Verify+settle runs locally using the
- * `@odatano/core` bridge.
- *
- * Stateless, call `localFacilitator()` once per service (or inline per
- * middleware mount); the returned object holds no per-instance state.
+ * The process-wide default facilitator. Every gate without its own
+ * `facilitator` uses this one, so they share the settlement claims and one
+ * payment cannot be delivered by two gates.
  */
-export function localFacilitator(): Facilitator {
+export function defaultFacilitator(): Facilitator {
+  return shared ??= localFacilitator();
+}
+
+/** In-process facilitator on `@odatano/core`. Holds the settlement store, so create it once per process. */
+export function localFacilitator(opts: LocalFacilitatorOptions = {}): Facilitator {
+  const ctx: SettleContext = {
+    store:                    opts.store ?? memorySettlementStore(),
+    allowMempoolConfirmation: opts.allowMempoolConfirmation ?? false,
+    pollBudgetMs:             opts.settlePollBudgetMs ?? 75_000,
+    pollIntervalMs:           opts.pollIntervalMs ?? 3_000,
+    claimGraceMs:             opts.claimGraceMs ?? 3_600_000,
+  };
   return {
-    verifyAndSettle: (args) => localProcess(args as ProcessArgs),
-    async supported(): Promise<FacilitatorSupportedResult> {
+    verify: async (payload, requirements) => (await runVerify(payload, requirements, ctx)).response,
+    settle: (payload, requirements) => runSettle(payload, requirements, ctx),
+    async supported() {
+      // Only the network the backend is on can be verified and settled.
+      const backend = await bridge.getBackendNetwork();
+      const networks = NETWORKS.filter(n => !backend || n === backend);
       return {
-        networks:             ['cardano:mainnet', 'cardano:preprod', 'cardano:preview'],
-        assetTransferMethods: [...SUPPORTED_TRANSFER_METHODS],
+        kinds: networks.map(network => ({
+          x402Version: 2 as const,
+          scheme:      'exact',
+          network,
+          extra: {
+            assetTransferMethods: [...SUPPORTED_TRANSFER_METHODS],
+            areFeesSponsored:     false,
+            l1Confirmations:      { minimum: ctx.allowMempoolConfirmation ? -1 : 0, maximum: 20 },
+          },
+        })),
+        extensions: [],
+        signers:    {},
       };
     },
   };

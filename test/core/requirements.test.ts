@@ -1,15 +1,16 @@
-// buildEntry checks script extras through srv/bridge → @odatano/core.
+// buildRequirements checks script extras through srv/bridge → @odatano/core.
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 jest.mock('@odatano/core', () => require('../fixtures/core-parse-mock').coreParseMock());
 
 import {
-  buildPaymentRequirements,
-  buildPaymentRequirementsMulti,
-  buildEntry,
-  flatRequirements,
+  buildRequirements,
+  buildPaymentRequired,
+  normalizeResource,
+  assertConfirmationPolicy,
 } from '../../srv/core/requirements';
 import {
   SELLER_ADDR,
+  BUYER_ADDR,
   SCRIPT_ADDR,
   SCRIPT_HASH,
   OTHER_SCRIPT_HASH,
@@ -18,229 +19,214 @@ import {
 } from '../fixtures/constants';
 import type { PaymentExtra, ScriptTransferExtra } from '../../srv/core/types';
 
-describe('buildEntry', () => {
-  const baseArgs = {
-    amount: '1000000',
-    asset:  USDM_PREPROD_ASSET,
-    payTo:  SELLER_ADDR,
-    network: NETWORK_PREPROD,
-    resource: { url: '/odata/v4/foo/getBar', description: 'X', mimeType: 'application/json' },
-  };
+const base = {
+  amount:  '1000000',
+  asset:   USDM_PREPROD_ASSET,
+  payTo:   SELLER_ADDR,
+  network: NETWORK_PREPROD,
+};
 
-  it('produces the canonical v2 entry shape', () => {
-    const e = buildEntry(baseArgs);
-    expect(e).toEqual({
-      scheme: 'exact',
-      network: NETWORK_PREPROD,
-      asset:   USDM_PREPROD_ASSET,
-      amount:  '1000000',
-      payTo:   SELLER_ADDR,
-      resource: { url: '/odata/v4/foo/getBar', description: 'X', mimeType: 'application/json' },
+describe('buildRequirements', () => {
+  it('produces the v2 entry without a resource', () => {
+    expect(buildRequirements(base)).toEqual({
+      scheme:            'exact',
+      network:           NETWORK_PREPROD,
+      asset:             USDM_PREPROD_ASSET,
+      amount:            '1000000',
+      payTo:             SELLER_ADDR,
       maxTimeoutSeconds: 600,
+      extra:             { areFeesSponsored: false },
     });
   });
 
-  it('amount accepts string|number|bigint', () => {
-    expect(buildEntry({ ...baseArgs, amount: 1_000_000 }).amount).toBe('1000000');
-    expect(buildEntry({ ...baseArgs, amount: 1_000_000n }).amount).toBe('1000000');
+  it('accepts string, number and bigint amounts', () => {
+    expect(buildRequirements({ ...base, amount: 1_000_000 }).amount).toBe('1000000');
+    expect(buildRequirements({ ...base, amount: 1_000_000n }).amount).toBe('1000000');
   });
 
-  it('rejects zero or non-positive amount', () => {
-    expect(() => buildEntry({ ...baseArgs, amount: '0' })).toThrow(/positive integer/);
-    expect(() => buildEntry({ ...baseArgs, amount: '-1' })).toThrow(/positive integer/);
-    expect(() => buildEntry({ ...baseArgs, amount: '1.5' })).toThrow(/positive integer/);
+  it.each(['0', '000', '-1', '1.5', 'abc'])('rejects amount %s', (amount) => {
+    expect(() => buildRequirements({ ...base, amount })).toThrow(/positive integer/);
   });
 
-  it('rejects missing payTo', () => {
-    expect(() => buildEntry({ ...baseArgs, payTo: '' })).toThrow(/payTo/);
+  it('requires payTo', () => {
+    expect(() => buildRequirements({ ...base, payTo: '' })).toThrow(/payTo is required/);
   });
 
-  it('rejects v1 network format', () => {
-    expect(() => buildEntry({ ...baseArgs, network: 'cardano-preprod' as never })).toThrow();
+  it('normalizes a CIP-34 network alias', () => {
+    expect(buildRequirements({ ...base, network: 'cip34:0-1' }).network).toBe(NETWORK_PREPROD);
   });
 
-  it('rejects v1 separate-field asset shape', () => {
-    expect(() => buildEntry({ ...baseArgs, asset: '16a55b2a349361ff88c03788f93e1e966e5d689605d044fef722ddde' }))
-      .toThrow();
+  it('keeps extra fields and always sets areFeesSponsored false', () => {
+    const e = buildRequirements({ ...base, extra: { decimals: 6, areFeesSponsored: true } });
+    expect(e.extra).toEqual({ decimals: 6, areFeesSponsored: false });
   });
 
-  it('accepts string resource (sugars into descriptor)', () => {
-    const e = buildEntry({ ...baseArgs, resource: '/foo' });
-    expect(e.resource).toEqual({ url: '/foo', description: '', mimeType: 'application/json' });
+  it('honours maxTimeoutSeconds', () => {
+    expect(buildRequirements({ ...base, maxTimeoutSeconds: 30 }).maxTimeoutSeconds).toBe(30);
   });
 
-  it('description / mimeType overrides take precedence', () => {
-    const e = buildEntry({
-      ...baseArgs,
-      resource: { url: '/foo', description: 'old', mimeType: 'text/plain' },
-      description: 'new',
-      mimeType: 'application/cbor',
+  it('writes the confirmationPolicy option into extra', () => {
+    const e = buildRequirements({ ...base, confirmationPolicy: { l1Confirmations: 3 } });
+    expect(e.extra?.confirmationPolicy).toEqual({ l1Confirmations: 3 });
+  });
+
+  it('prefers the confirmationPolicy in extra over the option', () => {
+    const e = buildRequirements({
+      ...base,
+      extra: { confirmationPolicy: { l1Confirmations: 0 } },
+      confirmationPolicy: { l1Confirmations: 5 },
     });
-    expect(e.resource).toEqual({ url: '/foo', description: 'new', mimeType: 'application/cbor' });
+    expect(e.extra?.confirmationPolicy).toEqual({ l1Confirmations: 0 });
   });
 
-  it('attaches extra fields when provided', () => {
-    const e = buildEntry({ ...baseArgs, extra: { decimals: 6, fingerprint: 'asset12…' } });
-    expect(e.extra).toEqual({ decimals: 6, fingerprint: 'asset12…' });
+  it.each([-2, 21, 1.5])('rejects l1Confirmations %s', (l1Confirmations) => {
+    expect(() => buildRequirements({ ...base, confirmationPolicy: { l1Confirmations } })).toThrow(/-1 to 20/);
   });
 
   it('rejects a transfer method it cannot verify', () => {
-    expect(() => buildEntry({
-      ...baseArgs,
+    expect(() => buildRequirements({
+      ...base,
       extra: { assetTransferMethod: 'masumi' } as unknown as PaymentExtra,
     })).toThrow(/'masumi' is not supported/);
   });
+});
 
-  it('honours maxTimeoutSeconds override', () => {
-    const e = buildEntry({ ...baseArgs, maxTimeoutSeconds: 30 });
-    expect(e.maxTimeoutSeconds).toBe(30);
+describe('assertConfirmationPolicy', () => {
+  it.each([-1, 0, 20])('accepts %s', (n) => {
+    expect(() => assertConfirmationPolicy({ l1Confirmations: n })).not.toThrow();
+  });
+  it.each([{}, null, { l1Confirmations: '1' }])('rejects %j', (p) => {
+    expect(() => assertConfirmationPolicy(p)).toThrow();
   });
 });
 
-describe('buildEntry, script transfer', () => {
-  const scriptArgs = (extra: Partial<ScriptTransferExtra>, payTo = SCRIPT_ADDR) => ({
+describe('buildRequirements, script transfer', () => {
+  const core = jest.requireMock('@odatano/core') as { plutusScriptHash: jest.Mock };
+  const scriptArgs = (extra: Partial<ScriptTransferExtra>, payTo: string = SCRIPT_ADDR) => ({
     amount: '2000000',
     asset:  'lovelace',
     payTo,
     network: NETWORK_PREPROD,
-    resource: '/lock',
     extra: { assetTransferMethod: 'script' as const, scriptHash: SCRIPT_HASH, ...extra },
   });
 
   it('keeps the script extra on the entry', () => {
-    const e = buildEntry(scriptArgs({ datum: 'd8799f182aff' }));
-    expect(e.extra).toEqual({ assetTransferMethod: 'script', scriptHash: SCRIPT_HASH, datum: 'd8799f182aff' });
+    const e = buildRequirements(scriptArgs({ datum: 'd8799f182aff' }));
+    expect(e.extra).toEqual({
+      assetTransferMethod: 'script', scriptHash: SCRIPT_HASH, datum: 'd8799f182aff', areFeesSponsored: false,
+    });
   });
 
   it('requires scriptHash or script', () => {
-    expect(() => buildEntry(scriptArgs({ scriptHash: undefined }))).toThrow(/needs extra.scriptHash or extra.script/);
+    expect(() => buildRequirements(scriptArgs({ scriptHash: undefined }))).toThrow(/needs extra.scriptHash or extra.script/);
   });
 
   it('rejects a malformed scriptHash', () => {
-    expect(() => buildEntry(scriptArgs({ scriptHash: 'ABC' }))).toThrow(/56 hex chars/);
+    expect(() => buildRequirements(scriptArgs({ scriptHash: 'ABC' }))).toThrow(/56 hex chars/);
   });
 
   it('rejects a payTo that is not a script address', () => {
-    expect(() => buildEntry(scriptArgs({}, SELLER_ADDR))).toThrow(/payTo must be a script address/);
+    expect(() => buildRequirements(scriptArgs({}, SELLER_ADDR))).toThrow(/payTo must be a script address/);
   });
 
   it('rejects a payTo of a different script', () => {
-    expect(() => buildEntry(scriptArgs({ scriptHash: OTHER_SCRIPT_HASH }))).toThrow(/is not the declared script/);
+    expect(() => buildRequirements(scriptArgs({ scriptHash: OTHER_SCRIPT_HASH }))).toThrow(/is not the declared script/);
   });
 
   it('rejects a datum that is not CBOR PlutusData', () => {
-    expect(() => buildEntry(scriptArgs({ datum: 'xyz' }))).toThrow(/CBOR hex of PlutusData/);
-    expect(() => buildEntry(scriptArgs({ datum: 'ff' }))).toThrow(/CBOR hex of PlutusData/);
+    expect(() => buildRequirements(scriptArgs({ datum: 'xyz' }))).toThrow(/CBOR hex of PlutusData/);
+    expect(() => buildRequirements(scriptArgs({ datum: 'ff' }))).toThrow(/CBOR hex of PlutusData/);
   });
 
   it('rejects plutusV1 and unknown script types', () => {
-    expect(() => buildEntry(scriptArgs({ script: { type: 'plutusV1', code: '00' } }))).toThrow(/'plutusV1' is not supported/);
+    expect(() => buildRequirements(scriptArgs({ script: { type: 'plutusV1', code: '00' } }))).toThrow(/'plutusV1' is not supported/);
     const script = { type: 'native', code: '00' } as unknown as ScriptTransferExtra['script'];
-    expect(() => buildEntry(scriptArgs({ script }))).toThrow(/'native' is not supported/);
+    expect(() => buildRequirements(scriptArgs({ script }))).toThrow(/'native' is not supported/);
   });
 
   it('accepts a script whose derived hash is the payTo credential', () => {
-    jest.requireMock('@odatano/core').plutusScriptHash.mockReturnValue(SCRIPT_HASH);
-    const e = buildEntry(scriptArgs({ scriptHash: undefined, script: { type: 'plutusV3', code: 'aabb' } }));
+    core.plutusScriptHash.mockReturnValue(SCRIPT_HASH);
+    const e = buildRequirements(scriptArgs({ scriptHash: undefined, script: { type: 'plutusV3', code: 'aabb' } }));
     expect(e.extra).toMatchObject({ script: { type: 'plutusV3', code: 'aabb' } });
   });
 });
 
-describe('buildPaymentRequirements', () => {
-  const baseArgs = {
-    amount: '1000000',
-    asset: USDM_PREPROD_ASSET,
-    payTo: SELLER_ADDR,
-    network: NETWORK_PREPROD,
-    resource: { url: '/x', description: '', mimeType: 'application/json' },
-  };
-
-  it('wraps a single entry in the 402 envelope', () => {
-    const body = buildPaymentRequirements(baseArgs);
-    expect(body.x402Version).toBe(2);
-    expect(body.accepts).toHaveLength(1);
-    expect(body.error).toBeUndefined();
+describe('normalizeResource', () => {
+  it('expands a string to { url }', () => {
+    expect(normalizeResource('/r')).toEqual({ url: '/r' });
   });
 
-  it('emits the missing-header error string when requested', () => {
-    const body = buildPaymentRequirements({ ...baseArgs, withMissingHeaderError: true });
-    expect(body.error).toBe('PAYMENT-SIGNATURE header is required');
+  it('keeps valid optional fields', () => {
+    const r = { url: '/r', serviceName: 'Prices', tags: ['a', 'b'], iconUrl: 'https://x.io/i.png' };
+    expect(normalizeResource(r)).toEqual(r);
+  });
+
+  it('requires a url', () => {
+    expect(() => normalizeResource({ url: '' })).toThrow(/url is required/);
+  });
+
+  it.each([
+    ['serviceName over 32 chars', { serviceName: 'x'.repeat(33) }],
+    ['serviceName not ASCII',     { serviceName: 'Prëis' }],
+    ['more than 5 tags',          { tags: ['a', 'b', 'c', 'd', 'e', 'f'] }],
+    ['tag over 32 chars',         { tags: ['x'.repeat(33)] }],
+    ['relative iconUrl',          { iconUrl: '/icon.png' }],
+    ['iconUrl over 2048 chars',   { iconUrl: `https://x.io/${'a'.repeat(2048)}` }],
+  ])('rejects %s', (_name, fields) => {
+    expect(() => normalizeResource({ url: '/r', ...fields })).toThrow();
   });
 });
 
-describe('buildPaymentRequirementsMulti', () => {
-  const baseArgs = {
-    payTo:    SELLER_ADDR,
-    network:  NETWORK_PREPROD,
-    asset:    'lovelace',
-    resource: '/multi',
-  };
+describe('buildPaymentRequired', () => {
+  const args = { payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace', resource: '/r' };
 
-  it('produces one accepts[] entry per option, inheriting defaults', () => {
-    const body = buildPaymentRequirementsMulti({
-      ...baseArgs,
-      options: [
-        { amount: '500000' },                            // inherits lovelace + SELLER_ADDR
-        { amount: '100000', asset: USDM_PREPROD_ASSET }, // overrides asset
-      ],
-    });
-    expect(body.accepts).toHaveLength(2);
-    expect(body.accepts[0]!.asset).toBe('lovelace');
-    expect(body.accepts[0]!.payTo).toBe(SELLER_ADDR);
-    expect(body.accepts[1]!.asset).toBe(USDM_PREPROD_ASSET);
-    expect(body.accepts[1]!.payTo).toBe(SELLER_ADDR);
+  it('wraps the entries with one top-level resource', () => {
+    const pr = buildPaymentRequired({ ...args, options: [{ amount: '1000000' }] });
+    expect(pr.x402Version).toBe(2);
+    expect(pr.resource).toEqual({ url: '/r' });
+    expect(pr.accepts).toHaveLength(1);
+    expect(pr.accepts[0]).not.toHaveProperty('resource');
+    expect(pr).not.toHaveProperty('error');
   });
 
-  it('per-option payTo / network / extra override top-level defaults', () => {
-    const body = buildPaymentRequirementsMulti({
-      ...baseArgs,
+  it('carries error and extensions when given', () => {
+    const pr = buildPaymentRequired({ ...args, options: [{ amount: '1' }], error: 'x', extensions: { foo: {} } });
+    expect(pr.error).toBe('x');
+    expect(pr.extensions).toEqual({ foo: {} });
+  });
+
+  it('fills option defaults from the top level', () => {
+    const pr = buildPaymentRequired({
+      ...args,
+      maxTimeoutSeconds: 120,
+      confirmationPolicy: { l1Confirmations: 2 },
+      options: [{ amount: '1000000' }, { amount: '5', asset: USDM_PREPROD_ASSET, payTo: BUYER_ADDR }],
+    });
+    expect(pr.accepts[0]).toMatchObject({ asset: 'lovelace', payTo: SELLER_ADDR, maxTimeoutSeconds: 120 });
+    expect(pr.accepts[1]).toMatchObject({ asset: USDM_PREPROD_ASSET, payTo: BUYER_ADDR });
+    expect(pr.accepts[1]!.extra?.confirmationPolicy).toEqual({ l1Confirmations: 2 });
+  });
+
+  it('lets an option extra replace the default extra', () => {
+    const pr = buildPaymentRequired({
+      ...args,
       extra: { tier: 'base' },
       options: [
-        { amount: '1000000', payTo: SCRIPT_ADDR, extra: { assetTransferMethod: 'script', scriptHash: SCRIPT_HASH } },
+        { amount: '1000000' },
+        { amount: '2000000', payTo: SCRIPT_ADDR, extra: { assetTransferMethod: 'script', scriptHash: SCRIPT_HASH } },
       ],
     });
-    expect(body.accepts[0]!.payTo).toBe(SCRIPT_ADDR);
-    expect(body.accepts[0]!.extra).toEqual({ assetTransferMethod: 'script', scriptHash: SCRIPT_HASH });
+    expect(pr.accepts[0]!.extra).toEqual({ tier: 'base', areFeesSponsored: false });
+    expect(pr.accepts[1]!.extra).toEqual({ assetTransferMethod: 'script', scriptHash: SCRIPT_HASH, areFeesSponsored: false });
   });
 
-  it('throws on empty options array', () => {
-    expect(() =>
-      buildPaymentRequirementsMulti({ ...baseArgs, options: [] }),
-    ).toThrow(/non-empty/);
+  it('rejects empty options', () => {
+    expect(() => buildPaymentRequired({ ...args, options: [] })).toThrow(/non-empty/);
   });
 
-  it('throws when an option lacks asset and no top-level asset is set', () => {
-    const { asset: _unused, ...withoutAsset } = baseArgs;
-    void _unused;
-    expect(() =>
-      buildPaymentRequirementsMulti({ ...withoutAsset, options: [{ amount: '1' }] }),
-    ).toThrow(/asset/);
-  });
-
-  it('emits the missing-header error string when requested', () => {
-    const body = buildPaymentRequirementsMulti({
-      ...baseArgs,
-      options: [{ amount: '500000' }],
-      withMissingHeaderError: true,
-    });
-    expect(body.error).toBe('PAYMENT-SIGNATURE header is required');
-  });
-});
-
-describe('flatRequirements', () => {
-  it('returns accepts[0]', () => {
-    const body = buildPaymentRequirements({
-      amount: '1',
-      asset: USDM_PREPROD_ASSET,
-      payTo: SELLER_ADDR,
-      network: NETWORK_PREPROD,
-      resource: '/r',
-    });
-    expect(flatRequirements(body)).toBe(body.accepts[0]);
-  });
-
-  it('throws on empty accepts', () => {
-    expect(() => flatRequirements({ x402Version: 2, accepts: [] }))
-      .toThrow(/accepts is empty/);
+  it('rejects an option without asset when no default is set', () => {
+    expect(() => buildPaymentRequired({
+      payTo: SELLER_ADDR, network: NETWORK_PREPROD, resource: '/r', options: [{ amount: '1' }],
+    })).toThrow(/missing `asset`/);
   });
 });

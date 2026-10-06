@@ -35,11 +35,11 @@
 
 | Folder | Role | Touches chain? |
 |---|---|---|
-| `srv/core/` | Types, decode, validate, requirements builder, asset/network helpers, error codes | No |
-| `srv/facilitator/` | `verify` (orchestrator), `settle`, `checkNonceUnspent`, adapter pattern (`localFacilitator`, `httpFacilitator`) | Yes (via `bridge`) |
-| `srv/middleware/` | `x402Middleware` (Express), `gateService` (CAP) | No directly; calls facilitator |
-| `srv/helpers/` | `buildUnsignedPaymentTx`, `verifyConfirmedPayment` | Yes (via `bridge`) |
-| `srv/client/` | `x402Fetch`, `x402Axios`, `createBridgePayHandler`, `encodePaymentEnvelope` | Sometimes (`createBridgePayHandler` calls `buildUnsignedPaymentTx`) |
+| `srv/core/` | Types, payload parsing, `accepted` matching, decode, structural verification rules, requirements builder, transfer methods, asset/network helpers, reason codes | No (decode and script hashing call pure core helpers) |
+| `srv/facilitator/` | `verify` (read-only), `settle`, chain rules (`chain.ts`), settlement claims (`store.ts`, `cds-store.ts`), `localFacilitator`, `httpFacilitator`, `createFacilitatorRouter` | Yes (via `bridge`) |
+| `srv/middleware/` | `x402Middleware` (Express), `gateService` (CAP), the shared `authorization` flow (`flow.ts`), issued requirements | Not directly; calls the facilitator |
+| `srv/helpers/` | `buildUnsignedPaymentTx`, `verifyConfirmedPayment`, address parsing | Yes (via `bridge`) |
+| `srv/client/` | `x402Fetch`, `x402Axios`, header protocol (`protocol.ts`), `createBridgePayHandler` | Sometimes (`createBridgePayHandler` calls `buildUnsignedPaymentTx`) |
 | `srv/bridge.ts` | Thin adapter over `@odatano/core` client. Single coupling point | Yes |
 
 ## Pure vs chain-touching split
@@ -50,17 +50,17 @@ Pure modules (`srv/core/*`) are decoupled from the bridge. You can unit-test the
 jest.mock('../../srv/bridge', () => bridgeFactory());
 ```
 
-The facilitator orchestrates `decode → validate → checkNonceUnspent → settle → onAccepted`. Each step has a dedicated module in `srv/facilitator/`; the orchestrator is `srv/facilitator/verify.ts`.
+A request runs `startPayment` (parse, match `accepted`, facilitator `verify`, `verifyTransfer`), then the protected handler, then `finishPayment` (facilitator `settle`). `verify` combines the structural rules (`core/validate.ts`) with the chain rules (`facilitator/chain.ts`); `settle` claims the transaction id, submits once and waits for the confirmation policy.
 
 ## Why the adapter pattern
 
 The `Facilitator` interface in `srv/facilitator/adapter.ts` is the one extension point that lets you swap in:
 
-- `localFacilitator()` (default): in-process via `@odatano/core`. Every resource server carries its own Cardano backend.
-- `httpFacilitator({ url, apiKey })`: delegates verify+settle to a hosted service. Resource servers don't need `@odatano/core` themselves.
+- `localFacilitator()`: in-process via `@odatano/core`. The default is one shared instance per process (`defaultFacilitator()`). Every resource server carries its own Cardano backend.
+- `httpFacilitator({ url, apiKey })`: any x402 v2 facilitator over HTTP. Resource servers still decode payments locally, so they need `@odatano/core` installed, but no Cardano backend.
 - Custom mock: for deterministic tests.
 
-This split is the architectural mirror of what Coinbase ships with `@coinbase/x402` for the EVM-flavoured x402. See [`facilitator-protocol.md`](facilitator-protocol.md) for the HTTP wire format.
+The interface and the HTTP API are those of the x402 v2 specification, so facilitators are interchangeable with other implementations. See [`facilitator-protocol.md`](facilitator-protocol.md).
 
 ## Plugin auto-discovery
 

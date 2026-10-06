@@ -2,12 +2,12 @@
  * Client-side helper types, symmetric to the server-side facilitator.
  *
  * A `PayHandler` is the one extension point: given the `accepts[]` entry
- * the user chose, it must produce a signed payment tx (CBOR hex) + the
- * v2 nonce reference. Everything else, 402-detection, retry loop,
- * envelope encoding, is generic and lives in `fetch.ts` / `axios.ts`.
+ * the user chose, it must produce a signed, unbroadcast payment tx (CBOR
+ * hex) and the nonce reference. 402 detection, the retry loop and the
+ * `PAYMENT-SIGNATURE` encoding live in `fetch.ts` / `axios.ts`.
  */
 
-import type { PaymentRequirementEntry } from '../core/types';
+import type { PaymentRequired, PaymentRequirements } from '../core/types';
 
 /**
  * Signs/produces the payment for one `accepts[]` entry.
@@ -17,7 +17,8 @@ import type { PaymentRequirementEntry } from '../core/types';
  * write your own for browser CIP-30 wallets.
  */
 export type PayHandler = (
-  requirement: PaymentRequirementEntry,
+  requirement: PaymentRequirements,
+  paymentRequired: PaymentRequired,
 ) => Promise<PayHandlerResult>;
 
 export interface PayHandlerResult {
@@ -31,18 +32,18 @@ export interface PayHandlerResult {
   nonceRef: string;
 }
 
-/** Pick which `accepts[]` entry to satisfy. Default: first entry with a supported transfer method. */
+/** Pick which `accepts[]` entry to satisfy. Default: `selectFirstSupported`. */
 export type AcceptsSelector = (
-  accepts: PaymentRequirementEntry[],
-) => PaymentRequirementEntry | undefined;
+  accepts: PaymentRequirements[],
+) => PaymentRequirements | undefined;
 
 export interface X402ClientOptions {
   /** Required, how to produce the signed payment tx. */
   pay: PayHandler;
   /**
    * Optional, choose one of the `accepts[]` entries when the server
-   * offers multiple. Defaults to the first entry whose
-   * `extra.assetTransferMethod` is `default` or `script`.
+   * offers multiple. Default: the first entry with a supported transfer
+   * method and the `authorization` payment flow.
    */
   selectAccepts?: AcceptsSelector;
   /**
@@ -52,8 +53,9 @@ export interface X402ClientOptions {
   maxRetries?: number;
   /**
    * How many times to re-send the SAME `PAYMENT-SIGNATURE` after the
-   * server answered 402 with `pending: true` (payment submitted but not
-   * yet visible on chain, the v2 contract is "retry the same envelope").
+   * server answered 402 with `PAYMENT-RESPONSE` `settlement_pending`
+   * (payment broadcast but not yet confirmed; the contract is to repeat
+   * the same header, never to pay again).
    * These re-sends do NOT invoke the pay handler and do NOT count
    * against `maxRetries`. Each server-side attempt blocks in its settle
    * poll (~60s default), so total wait ≈ pendingRetries × poll budget.
@@ -64,7 +66,7 @@ export interface X402ClientOptions {
   pendingRetryDelayMs?: number;
   /**
    * When `true`, throw an `X402PaymentError` after retries are
-   * exhausted (or when the 402 body is malformed). Default `false`:
+   * exhausted (or when the 402 carries no valid `PAYMENT-REQUIRED`). Default `false`:
    *
    *   - `x402Fetch` returns the last `Response` (the 402 itself).
    *   - `x402Axios` re-throws the original AxiosError.

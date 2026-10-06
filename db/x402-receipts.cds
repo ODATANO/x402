@@ -12,11 +12,12 @@
 
 namespace odatano.x402;
 
+@assert.unique: { txHash: [txHash] }
 entity X402Receipts {
     key id         : UUID;
 
     @description: 'Lowercase 64-char hex of the buyer''s settled payment tx.'
-        txHash     : String(64) @assert.unique;
+        txHash     : String(64);
 
     @description: 'Sender address (first input bech32) if the facilitator resolved it.'
         payerAddr  : String(120);

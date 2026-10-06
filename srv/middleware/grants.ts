@@ -27,21 +27,13 @@
 
 import cds from '@sap/cds';
 import { randomBytes } from 'crypto';
+import { runDetached } from '../helpers/db';
 import type { PaymentClaim } from '../core/types';
 
 const log = cds.log('x402');
 
 export const DEFAULT_GRANTS_ENTITY = 'odatano.x402.X402Grants';
 export const DEFAULT_GRANT_TTL_SECONDS = 3600;
-
-/** Resolve entity name from the `grants` option. */
-export function resolveGrantsEntity(
-  grants: boolean | { ttlSeconds?: number; entity?: string } | undefined,
-): string | null {
-  if (!grants) return null;
-  if (grants === true) return DEFAULT_GRANTS_ENTITY;
-  return grants.entity ?? DEFAULT_GRANTS_ENTITY;
-}
 
 /** Resolve TTL (seconds) from the `grants` option. */
 export function resolveGrantTtl(
@@ -77,8 +69,8 @@ export async function issueGrant(
   const expiresAt = new Date(now + ttlSeconds * 1000).toISOString();
 
   try {
-    await INSERT.into(entityName).entries({
-      ID:        cds.utils.uuid(),
+    await runDetached(cds.ql.INSERT.into(entityName).entries({
+      id:        cds.utils.uuid(),
       token,
       route,
       payerAddr: claim.payerAddr ?? null,
@@ -87,7 +79,7 @@ export async function issueGrant(
       network:   claim.network,
       issuedAt:  new Date(now).toISOString(),
       expiresAt,
-    });
+    }));
     return { token, expiresAt };
   } catch (err) {
     log.warn(
@@ -117,9 +109,9 @@ export async function lookupGrant(
   if (!token) return { kind: 'not-found' };
 
   try {
-    const row = await SELECT.one
-      .from(entityName)
-      .where({ token, route }) as { expiresAt?: string } | null;
+    const row = await runDetached<{ expiresAt?: string } | null>(
+      cds.ql.SELECT.one.from(entityName).where({ token, route }),
+    );
 
     if (!row) return { kind: 'not-found' };
     const expiresMs = row.expiresAt ? Date.parse(row.expiresAt) : 0;

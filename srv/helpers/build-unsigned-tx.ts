@@ -25,25 +25,22 @@
  */
 
 import * as bridge from '../bridge';
-import type { PaymentRequirementEntry } from '../core/types';
+import type { PaymentRequirements } from '../core/types';
 import { parseAsset } from '../core/asset';
 import { parsePaymentAddress } from './address';
 import { isScriptExtra } from '../core/transfer-method';
 import { transferExtraProblem } from '../core/transfer';
 
-/** Cardano networks run 1-second slots, so TTL slots ≈ TTL seconds. */
-const SLOT_MS = 1000;
+/** Headroom below `maxTimeoutSeconds`, so slot rounding never lands past the facilitator's bound. */
+const TTL_MARGIN_SECONDS = 10;
 
 export interface BuildUnsignedTxArgs {
   /** Buyer's bech32 address (must be Base or Enterprise with VKey-hash payment cred). */
   buyerBech32: string;
-  /** A single accepts[] entry, call `flatRequirements(body)` to extract. */
-  requirements: PaymentRequirementEntry;
-  /**
-   * Optional TTL in slots from "now" (= current chain tip).
-   * Default 1800 (≈30 min on Cardano's 1s-slot networks).
-   */
-  ttlSlotsFromNow?: number;
+  /** The `accepts[]` entry to pay. */
+  requirements: PaymentRequirements;
+  /** default and maximum: `requirements.maxTimeoutSeconds` minus a small margin; TTL from now */
+  ttlSeconds?: number;
 }
 
 export interface UnsignedTxResult {
@@ -75,11 +72,14 @@ export async function buildUnsignedPaymentTx(
   if (transferProblem) throw new Error(`buildUnsignedPaymentTx: ${transferProblem}`);
   const datum = isScriptExtra(requirements.extra) ? requirements.extra.datum : undefined;
 
-  // 2. Translate the v2 requirement into a core transfer request. Core
-  //    raises the output to its min-ADA, which grows with the datum.
+  // 2. Translate the requirement into a core transfer request. A
+  //    lovelace amount is the output coin and must clear min-UTxO itself
+  //    (core rejects it otherwise); a token output gets its min-ADA added.
   const parsedAsset = parseAsset(requirements.asset);
   const required = BigInt(requirements.amount);
-  const validityEndMs = Date.now() + (args.ttlSlotsFromNow ?? 1800) * SLOT_MS;
+  // Rule 7: the TTL may not lie beyond now + maxTimeoutSeconds. core turns the time into a slot.
+  const maxTtl = Math.max(1, requirements.maxTimeoutSeconds - TTL_MARGIN_SECONDS);
+  const validityEndMs = Date.now() + Math.min(args.ttlSeconds ?? maxTtl, maxTtl) * 1000;
 
   const req: bridge.CoreTransferReq = {
     senderAddress:    buyerBech32,
@@ -89,7 +89,7 @@ export async function buildUnsignedPaymentTx(
       ? { lovelaceAmount: required.toString() }
       : { lovelaceAmount: '0', assets: [{ unit: parsedAsset.unit, quantity: required.toString() }] }),
     validityEndMs,
-    ensureMinAda:     true,
+    ...(parsedAsset.isLovelace ? {} : { ensureMinAda: true }),
     ...(datum !== undefined ? { outputDatumCbor: datum } : {}),
   };
 

@@ -1,57 +1,40 @@
 /**
- * Express middleware tests. We don't spin up an actual HTTP server ,
- * the middleware is just `(req, res, next) => Promise<void>`, so we
- * call it directly with hand-rolled req/res mocks and assert on the
- * side effects (status code, JSON body, headers, next() called).
- *
- * Both the bridge and the facilitator's `process` are mocked, so each
- * test pins exactly one outcome (accepted/rejected/pending).
+ * Express middleware against a real HTTP server, so the response holding
+ * (`writeHead`, `write`, `end` capture until settlement) runs for real.
+ * The facilitator is a fake; payment headers carry real signed transactions.
  */
 
-import { bridgeFactory } from '../fixtures/mock-bridge';
-jest.mock('../../srv/bridge', () => bridgeFactory());
+// decodePayment runs through srv/bridge → @odatano/core; stub the barrel to its pure parser.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+jest.mock('@odatano/core', () => require('../fixtures/core-parse-mock').coreParseMock());
 
-const mockProcess = jest.fn();
-const mockCheckTransfer = jest.fn();
-jest.mock('../../srv/facilitator/verify', () => ({
-  process: (...args: unknown[]) => mockProcess(...args),
-  checkTransfer: (...args: unknown[]) => mockCheckTransfer(...args),
+const mockDefaultFacilitator = jest.fn();
+jest.mock('../../srv/facilitator/adapter', () => ({
+  defaultFacilitator: () => mockDefaultFacilitator(),
 }));
 
-import { x402Middleware } from '../../srv/middleware/express';
+import express, { type Request } from 'express';
+import type { Server } from 'http';
+import type { AddressInfo } from 'net';
+import { x402Middleware, type X402MiddlewareOptions } from '../../srv/middleware/express';
+import { paymentRequiredFor } from '../../srv/middleware/flow';
 import { Codes } from '../../srv/core/errors';
-import { SELLER_ADDR, NETWORK_PREPROD, USDM_PREPROD_ASSET } from '../fixtures/constants';
-import type { Request, Response } from 'express';
-
-interface MockRes {
-  statusCode: number;
-  headers: Record<string, string>;
-  body: unknown;
-  status(code: number): MockRes;
-  json(b: unknown): MockRes;
-  setHeader(k: string, v: string): void;
-}
-
-function mockRes(): MockRes {
-  const res: MockRes = {
-    statusCode: 0,
-    headers: {},
-    body: undefined,
-    status(code) { this.statusCode = code; return this; },
-    json(b) { this.body = b; return this; },
-    setHeader(k, v) { this.headers[k] = v; },
-  };
-  return res;
-}
-
-function mockReq(opts: { path?: string; originalUrl?: string; headers?: Record<string, string> } = {}): Request {
-  return {
-    path: opts.path ?? '/foo',
-    originalUrl: opts.originalUrl ?? '/foo',
-    url: opts.originalUrl ?? '/foo',
-    headers: opts.headers ?? {},
-  } as unknown as Request;
-}
+import {
+  BUYER_ADDR, BUYER_PRIV, SELLER_ADDR,
+  NONCE_TX_HASH, NONCE_INDEX, NONCE_REF,
+  NETWORK_PREPROD, TTL_SLOT,
+} from '../fixtures/constants';
+import { buildBody, signTx } from '../fixtures/build-tx';
+import { buildPaymentSignature, decodeHeader } from '../fixtures/envelope';
+import type { Facilitator } from '../../srv/facilitator/adapter';
+import type {
+  PaymentClaim,
+  PaymentPayload,
+  PaymentRequired,
+  PaymentRequirements,
+  SettlementResponse,
+  VerifyResponse,
+} from '../../srv/core/types';
 
 const baseOpts = {
   payTo: SELLER_ADDR,
@@ -60,371 +43,292 @@ const baseOpts = {
   priceUnits: '1000000',
 };
 
-beforeEach(() => { jest.resetAllMocks(); });
+const SETTLED: SettlementResponse = {
+  success: true, transaction: 'ab'.repeat(32), network: NETWORK_PREPROD, payer: BUYER_ADDR, amount: '1000000',
+};
+
+function fakeFacilitator() {
+  return {
+    verify: jest.fn<Promise<VerifyResponse>, [PaymentPayload, PaymentRequirements]>()
+      .mockResolvedValue({ isValid: true, payer: BUYER_ADDR }),
+    settle: jest.fn<Promise<SettlementResponse>, [PaymentPayload, PaymentRequirements]>()
+      .mockResolvedValue(SETTLED),
+  } satisfies Facilitator;
+}
+
+function paymentHeader(): string {
+  const accepted = paymentRequiredFor(baseOpts, [{ amount: '1000000' }], '/').accepts[0]!;
+  const body = buildBody({
+    inputs: [{ txHash: NONCE_TX_HASH, outputIndex: NONCE_INDEX }],
+    outputs: [{ address: SELLER_ADDR, lovelace: '1000000' }],
+    ttlSlot: TTL_SLOT,
+  });
+  return buildPaymentSignature({ accepted, txCborHex: signTx(body, [BUYER_PRIV]).cborHex, nonceRef: NONCE_REF });
+}
+
+interface Running { url: string; close: () => Promise<void> }
+
+/** Headers the `/api/csv` handler sets itself. */
+const HANDLER_HEADERS = {
+  'Content-Type':        'text/csv; charset=utf-8',
+  'Set-Cookie':          'session=abc; Path=/',
+  'Cache-Control':       'public, max-age=3600',
+  'Content-Disposition': 'attachment; filename="quotes.csv"',
+  'ETag':                'W/"handler-etag"',
+};
+
+/** Serve `/api/*` behind the middleware with handlers covering every response style. */
+async function serve(opts: Partial<X402MiddlewareOptions>): Promise<Running> {
+  const app = express();
+  // set before the gate runs, as a request-id middleware would
+  app.use((_req, res, next) => { res.setHeader('X-Request-Id', 'req-1'); next(); });
+  app.use('/api', x402Middleware({ ...baseOpts, ...opts }));
+  app.get('/api/csv', (_req, res) => { res.set(HANDLER_HEADERS).send('a;b\n1;2\n'); });
+  app.get('/api/json', (req: Request, res) => { res.json({ ok: true, payment: req.payment }); });
+  app.get('/api/send', (_req, res) => { res.send('hello'); });
+  app.get('/api/stream', (_req, res) => { res.write('a'); res.write('b'); res.end('c'); });
+  app.get('/api/head', (_req, res) => { res.writeHead(201, { 'X-Custom': '1' }); res.end('made'); });
+  app.get('/api/short', (_req, res) => { res.send('x'); });
+  app.get('/api/fail', (_req, res) => { res.status(500).json({ error: 'boom' }); });
+  app.get('/api/throw', () => { throw new Error('handler threw'); });
+  app.get('/api/\\$metadata', (_req, res) => { res.send('metadata'); });
+  const server: Server = await new Promise(r => { const s = app.listen(0, () => r(s)); });
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    close: () => new Promise(r => server.close(() => r())),
+  };
+}
+
+let running: Running | undefined;
+beforeEach(() => { mockDefaultFacilitator.mockReset(); });
+afterEach(async () => { await running?.close(); running = undefined; });
+
+async function paidGet(path: string, opts: Partial<X402MiddlewareOptions>) {
+  running = await serve(opts);
+  return fetch(`${running.url}${path}`, { headers: { 'PAYMENT-SIGNATURE': paymentHeader() } });
+}
 
 describe('x402Middleware, argument validation', () => {
-  it('throws if payTo missing', () => {
-    expect(() => x402Middleware({ ...baseOpts, payTo: '' as never })).toThrow(/payTo/);
+  it.each(['payTo', 'network', 'asset'] as const)('throws without %s', (field) => {
+    expect(() => x402Middleware({ ...baseOpts, [field]: '' })).toThrow(field);
   });
-  it('throws if network missing', () => {
-    expect(() => x402Middleware({ ...baseOpts, network: '' as never })).toThrow(/network/);
-  });
-  it('throws if asset missing', () => {
-    expect(() => x402Middleware({ ...baseOpts, asset: '' as never })).toThrow(/asset/);
-  });
-  it('throws if neither priceUnits nor routePricing provided', () => {
-    const opts = { payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace' };
-    expect(() => x402Middleware(opts as never)).toThrow(/priceUnits or routePricing/);
+  it('throws without priceUnits or routePricing', () => {
+    expect(() => x402Middleware({ payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace' }))
+      .toThrow(/priceUnits or routePricing/);
   });
 });
 
-describe('x402Middleware, bypass paths', () => {
-  it('passes through default-skipped OData $metadata', async () => {
-    const mw = x402Middleware(baseOpts);
-    const req = mockReq({ path: '/$metadata' });
-    const res = mockRes();
-    const next = jest.fn();
-    await mw(req, res as unknown as Response, next);
-    expect(next).toHaveBeenCalled();
-    expect(res.statusCode).toBe(0);
-    expect(mockProcess).not.toHaveBeenCalled();
+describe('x402Middleware, default facilitator', () => {
+  it('uses the process-wide default when none is passed', async () => {
+    const shared = fakeFacilitator();
+    mockDefaultFacilitator.mockReturnValue(shared);
+    x402Middleware(baseOpts);
+    const res = await paidGet('/api/send', {});
+    expect(mockDefaultFacilitator).toHaveBeenCalledTimes(2);
+    expect(res.status).toBe(200);
+    expect(shared.verify).toHaveBeenCalledTimes(1);
+    expect(shared.settle).toHaveBeenCalledTimes(1);
   });
 
-  it('passes through root path', async () => {
-    const mw = x402Middleware(baseOpts);
-    const next = jest.fn();
-    await mw(mockReq({ path: '/' }), mockRes() as unknown as Response, next);
-    expect(next).toHaveBeenCalled();
-  });
-
-  it('passes through unmapped path under routePricing (no priceUnits fallback)', async () => {
-    const mw = x402Middleware({
-      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
-      routePricing: { getBestPrice: '10000' },
-    });
-    const next = jest.fn();
-    await mw(mockReq({ path: '/getOhlcv' }), mockRes() as unknown as Response, next);
-    expect(next).toHaveBeenCalled();
-    expect(mockProcess).not.toHaveBeenCalled();
+  it('does not ask for the default when a facilitator is passed', () => {
+    x402Middleware({ ...baseOpts, facilitator: fakeFacilitator() });
+    expect(mockDefaultFacilitator).not.toHaveBeenCalled();
   });
 });
 
-describe('x402Middleware, pricing resolution', () => {
-  it('strips OData function args from segment for routePricing lookup', async () => {
-    mockProcess.mockResolvedValue({ kind: 'rejected', code: Codes.MISSING_HEADER, reason: 'r',
-      requirementsBody: { x402Version: 2, error: 'PAYMENT-SIGNATURE header is required', accepts: [] } });
-    const mw = x402Middleware({
-      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
-      routePricing: { getBestPrice: '7777' },
-    });
-    await mw(mockReq({ path: '/getBestPrice(pair=\'ADA-USD\')' }), mockRes() as unknown as Response, jest.fn());
-    const call = mockProcess.mock.calls[0]![0] as { requirementsBody: { accepts: Array<{ amount: string }> } };
-    expect(call.requirementsBody.accepts[0]!.amount).toBe('7777');
-  });
-});
-
-describe('x402Middleware, dynamic pricing (routePricing as function)', () => {
-  function stubAccepts() {
-    mockProcess.mockResolvedValue({
-      kind: 'rejected',
-      code: Codes.MISSING_HEADER,
-      reason: 'r',
-      requirementsBody: { x402Version: 2, error: '', accepts: [] },
-    });
-  }
-
-  it('invokes the resolver with PricingContext and uses its scalar return', async () => {
-    stubAccepts();
-    const resolver = jest.fn(() => '4242');
-    const mw = x402Middleware({
-      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
-      routePricing: resolver,
-    });
-    await mw(
-      mockReq({ path: '/getBestPrice(pair=\'ADA-USD\')', headers: { 'x-tier': 'gold' } }),
-      mockRes() as unknown as Response,
-      jest.fn(),
-    );
-    expect(resolver).toHaveBeenCalledTimes(1);
-    const ctx = resolver.mock.calls[0]![0] as { event: string; path: string; headers: Record<string, string> };
-    expect(ctx.event).toBe('getBestPrice');
-    expect(ctx.path).toBe('/getBestPrice(pair=\'ADA-USD\')');
-    expect(ctx.headers['x-tier']).toBe('gold');
-
-    const call = mockProcess.mock.calls[0]![0] as { requirementsBody: { accepts: Array<{ amount: string }> } };
-    expect(call.requirementsBody.accepts[0]!.amount).toBe('4242');
+describe('x402Middleware, unpaid requests', () => {
+  it('answers 402 with PAYMENT-REQUIRED and the resource URL', async () => {
+    const facilitator = fakeFacilitator();
+    running = await serve({ facilitator });
+    const res = await fetch(`${running.url}/api/json`);
+    expect(res.status).toBe(402);
+    const pr = decodeHeader<PaymentRequired>(res.headers.get('payment-required'));
+    expect(pr.resource.url).toBe('/api/json');
+    expect(pr.accepts[0]!.amount).toBe('1000000');
+    expect(await res.json()).toEqual(pr);
+    expect(facilitator.verify).not.toHaveBeenCalled();
   });
 
-  it('treats null resolver result as pass-through (no facilitator call, next called)', async () => {
-    const next = jest.fn();
-    const mw = x402Middleware({
-      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
-      routePricing: () => null,
-    });
-    await mw(mockReq({ path: '/anything' }), mockRes() as unknown as Response, next);
-    expect(next).toHaveBeenCalled();
-    expect(mockProcess).not.toHaveBeenCalled();
+  it('answers 400 for a malformed payment header', async () => {
+    running = await serve({ facilitator: fakeFacilitator() });
+    const res = await fetch(`${running.url}/api/json`, { headers: { 'PAYMENT-SIGNATURE': 'garbage!!' } });
+    expect(res.status).toBe(400);
+    expect(decodeHeader<PaymentRequired>(res.headers.get('payment-required')).error).toContain(Codes.INVALID_PAYLOAD);
   });
 
-  it('supports async resolver', async () => {
-    stubAccepts();
-    const mw = x402Middleware({
-      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
-      routePricing: async () => ({ amount: '8888' }),
-    });
-    await mw(mockReq({ path: '/foo' }), mockRes() as unknown as Response, jest.fn());
-    const call = mockProcess.mock.calls[0]![0] as { requirementsBody: { accepts: Array<{ amount: string }> } };
-    expect(call.requirementsBody.accepts[0]!.amount).toBe('8888');
+  it('passes skipped paths through unpaid', async () => {
+    running = await serve({ facilitator: fakeFacilitator() });
+    const res = await fetch(`${running.url}/api/$metadata`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('metadata');
   });
 
-  it('emits multi-entry accepts[] when resolver returns RouteOption[]', async () => {
-    stubAccepts();
-    const mw = x402Middleware({
-      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
-      routePricing: () => [
-        { amount: '500000' },
-        { amount: '100000', asset: USDM_PREPROD_ASSET },
-      ],
-    });
-    await mw(mockReq({ path: '/foo' }), mockRes() as unknown as Response, jest.fn());
-    const call = mockProcess.mock.calls[0]![0] as {
-      requirementsBody: { accepts: Array<{ amount: string; asset: string }> };
-    };
-    expect(call.requirementsBody.accepts).toHaveLength(2);
-    expect(call.requirementsBody.accepts[0]!.asset).toBe('lovelace');
-    expect(call.requirementsBody.accepts[1]!.asset).toBe(USDM_PREPROD_ASSET);
+  it('passes through when the resolver returns null', async () => {
+    running = await serve({ facilitator: fakeFacilitator(), priceUnits: undefined, routePricing: () => null });
+    const res = await fetch(`${running.url}/api/send`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('hello');
   });
 
-  it('returns 500 + next(err) when the resolver throws', async () => {
-    const mw = x402Middleware({
-      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
+  it('answers 500 when the resolver throws', async () => {
+    running = await serve({
+      facilitator: fakeFacilitator(), priceUnits: undefined,
       routePricing: () => { throw new Error('pricing DB down'); },
     });
-    const next = jest.fn();
-    await mw(mockReq({ path: '/foo' }), mockRes() as unknown as Response, next);
-    expect(next).toHaveBeenCalledWith(expect.any(Error));
-    expect(mockProcess).not.toHaveBeenCalled();
+    const res = await fetch(`${running.url}/api/send`);
+    expect(res.status).toBe(500);
   });
 
-  it('next(err) when resolver returns an empty array (illegal RouteOption[])', async () => {
-    const mw = x402Middleware({
-      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace',
-      routePricing: () => [],
-    });
-    const next = jest.fn();
-    await mw(mockReq({ path: '/foo' }), mockRes() as unknown as Response, next);
-    expect(next).toHaveBeenCalledWith(expect.any(Error));
+  it('prices by the URL segment without OData arguments', async () => {
+    running = await serve({ facilitator: fakeFacilitator(), priceUnits: undefined, routePricing: { json: '7777' } });
+    const res = await fetch(`${running.url}/api/json(pair='ADA')`);
+    expect(decodeHeader<PaymentRequired>(res.headers.get('payment-required')).accepts[0]!.amount).toBe('7777');
   });
 });
 
-describe('x402Middleware, 402 paths', () => {
-  it('returns 402 with requirements body on missing header', async () => {
-    mockProcess.mockResolvedValue({
-      kind: 'rejected',
-      code: Codes.MISSING_HEADER,
-      reason: 'X-…',
-      requirementsBody: {
-        x402Version: 2,
-        error: 'PAYMENT-SIGNATURE header is required',
-        accepts: [{ scheme: 'exact', network: NETWORK_PREPROD, asset: 'lovelace', amount: '1000000',
-                    payTo: SELLER_ADDR, resource: { url: '/foo', description: '', mimeType: 'application/json' },
-                    maxTimeoutSeconds: 600 }],
-      },
-    });
-    const mw = x402Middleware(baseOpts);
-    const res = mockRes();
-    await mw(mockReq(), res as unknown as Response, jest.fn());
-    expect(res.statusCode).toBe(402);
-    const body = res.body as { x402Version: number; error: string };
-    expect(body.x402Version).toBe(2);
-    expect(body.error).toBe('PAYMENT-SIGNATURE header is required');
+describe('x402Middleware, paid requests', () => {
+  it('settles, then sends the handler body with PAYMENT-RESPONSE; req.payment is set for the handler', async () => {
+    const facilitator = fakeFacilitator();
+    const res = await paidGet('/api/json', { facilitator });
+    expect(res.status).toBe(200);
+    expect(decodeHeader(res.headers.get('payment-response'))).toEqual(SETTLED);
+    const body = await res.json() as { ok: boolean; payment: PaymentClaim };
+    expect(body.ok).toBe(true);
+    expect(body.payment.payTo).toBe(SELLER_ADDR);
+    expect(body.payment.payerAddr).toBe(BUYER_ADDR);
+    expect(facilitator.settle).toHaveBeenCalledTimes(1);
   });
 
-  it('appends (code): reason to error when rejection is more specific than MISSING_HEADER', async () => {
-    mockProcess.mockResolvedValue({
-      kind: 'rejected',
-      code: Codes.INSUFFICIENT_AMOUNT,
-      reason: 'paid 500000 < required 1000000',
-      requirementsBody: {
-        x402Version: 2,
-        error: 'PAYMENT-SIGNATURE header is required',
-        accepts: [],
-      },
-    });
-    const mw = x402Middleware(baseOpts);
-    const res = mockRes();
-    await mw(mockReq(), res as unknown as Response, jest.fn());
-    const body = res.body as { error: string };
-    expect(body.error).toMatch(/insufficient_amount/);
-    expect(body.error).toMatch(/paid 500000/);
+  it.each([
+    ['/api/send', 'hello'],
+    ['/api/stream', 'abc'],
+  ])('holds %s until settlement and delivers it whole', async (path, text) => {
+    const res = await paidGet(path, { facilitator: fakeFacilitator() });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('payment-response')).toBeTruthy();
+    expect(await res.text()).toBe(text);
   });
 
-  it('returns 402 with pending=true on pending result', async () => {
-    mockProcess.mockResolvedValue({
-      kind: 'pending',
-      code: Codes.PENDING,
-      reason: 'tx not visible',
-      txHash: 'ab'.repeat(32),
-      requirementsBody: { x402Version: 2, error: 'PAYMENT-SIGNATURE header is required', accepts: [] },
-    });
-    const mw = x402Middleware(baseOpts);
-    const res = mockRes();
-    await mw(mockReq(), res as unknown as Response, jest.fn());
-    const body = res.body as { pending: boolean; transaction: string };
-    expect(res.statusCode).toBe(402);
-    expect(body.pending).toBe(true);
-    expect(body.transaction).toBe('ab'.repeat(32));
-  });
-});
-
-describe('x402Middleware, accepted path', () => {
-  it('sets X-PAYMENT-RESPONSE and calls next()', async () => {
-    mockProcess.mockResolvedValue({
-      kind: 'accepted',
-      txHash: 'cd'.repeat(32),
-      payment: { txHash: 'cd'.repeat(32), amountUnits: '1000000', network: NETWORK_PREPROD,
-                 unit: '', asset: 'lovelace', resourceUrl: '/foo', nonceRef: 'x#0' },
-      paymentResponseB64: 'eyJzdWNjZXNzIjp0cnVlfQ==',
-    });
-    const mw = x402Middleware(baseOpts);
-    const req = mockReq();
-    const res = mockRes();
-    const next = jest.fn();
-    await mw(req, res as unknown as Response, next);
-    expect(next).toHaveBeenCalledTimes(1);
-    expect(res.headers['X-PAYMENT-RESPONSE']).toBe('eyJzdWNjZXNzIjp0cnVlfQ==');
-    expect((req as unknown as { payment?: unknown }).payment).toBeDefined();
-  });
-});
-
-describe('x402Middleware, internal errors', () => {
-  it('calls next(err) when process throws unexpectedly', async () => {
-    mockProcess.mockRejectedValue(new Error('boom'));
-    const mw = x402Middleware(baseOpts);
-    const next = jest.fn();
-    await mw(mockReq(), mockRes() as unknown as Response, next);
-    expect(next).toHaveBeenCalledWith(expect.any(Error));
-  });
-});
-
-describe('x402Middleware, optional process args', () => {
-  it('forwards settlePollBudgetMs to the facilitator call', async () => {
-    mockProcess.mockResolvedValue({
-      kind: 'accepted',
-      payment: { txHash: 'a'.repeat(64), amountUnits: '1000000', network: NETWORK_PREPROD,
-                 unit: '', asset: 'lovelace', resourceUrl: '/foo', nonceRef: 'x#0' },
-      paymentResponseB64: '',
-    });
-    const mw = x402Middleware({ ...baseOpts, settlePollBudgetMs: 5_000, allowNoTtl: true });
-    await mw(mockReq(), mockRes() as unknown as Response, jest.fn());
-    const arg = mockProcess.mock.calls[0]![0] as { settlePollBudgetMs?: number; allowNoTtl?: boolean };
-    expect(arg.settlePollBudgetMs).toBe(5_000);
-    expect(arg.allowNoTtl).toBe(true);
+  it('keeps a status and headers set via writeHead', async () => {
+    const res = await paidGet('/api/head', { facilitator: fakeFacilitator() });
+    expect(res.status).toBe(201);
+    expect(res.headers.get('x-custom')).toBe('1');
+    expect(res.headers.get('payment-response')).toBeTruthy();
+    expect(await res.text()).toBe('made');
   });
 
-  it('forwards maxTimeoutSeconds / extra into accepts[]', async () => {
-    let captured: { accepts: Array<{ maxTimeoutSeconds?: number; extra?: unknown }> } | undefined;
-    mockProcess.mockImplementation(async (args: unknown) => {
-      captured = (args as { requirementsBody: typeof captured }).requirementsBody;
-      return {
-        kind: 'rejected', code: Codes.MISSING_HEADER, reason: 'r',
-        requirementsBody: { x402Version: 2, accepts: [] },
-      };
-    });
-    const mw = x402Middleware({
-      ...baseOpts,
-      maxTimeoutSeconds:   900,
-      extra:               { tier: 'gold' },
-    });
-    await mw(mockReq(), mockRes() as unknown as Response, jest.fn());
-    expect(captured?.accepts[0]?.maxTimeoutSeconds).toBe(900);
-    expect(captured?.accepts[0]?.extra).toEqual({ tier: 'gold' });
+  it.each(['/api/fail', '/api/throw'])('does not settle when %s fails', async (path) => {
+    const facilitator = fakeFacilitator();
+    const res = await paidGet(path, { facilitator });
+    expect(res.status).toBe(500);
+    expect(res.headers.get('payment-response')).toBeNull();
+    expect(facilitator.settle).not.toHaveBeenCalled();
   });
 
-  it('wraps onAccepted so the user callback fires after settle', async () => {
-    const userOnAccepted = jest.fn();
-    let captured: ((c: unknown) => unknown) | undefined;
-    mockProcess.mockImplementation(async (args: unknown) => {
-      captured = (args as { onAccepted?: (c: unknown) => unknown }).onAccepted;
-      return {
-        kind: 'accepted',
-        payment: { txHash: 'a'.repeat(64), amountUnits: '1000000', network: NETWORK_PREPROD,
-                   unit: '', asset: 'lovelace', resourceUrl: '/foo', nonceRef: 'x#0' },
-        paymentResponseB64: '',
-      };
-    });
-    const mw = x402Middleware({ ...baseOpts, onAccepted: userOnAccepted });
-    await mw(mockReq(), mockRes() as unknown as Response, jest.fn());
-    expect(captured).toBeDefined();
-    // Simulate the facilitator invoking the wrapped onAccepted.
-    await captured!({ txHash: 'h' });
-    expect(userOnAccepted).toHaveBeenCalledWith({ txHash: 'h' }, expect.any(Object));
-  });
-});
-
-describe('x402Middleware, verifyTransfer', () => {
-  const accepted = {
-    kind: 'accepted', txHash: 'a'.repeat(64), paymentResponseB64: 'e30=',
-    payment: { txHash: 'a'.repeat(64) },
-  };
-
-  it('answers 402 transfer_rejected without calling the facilitator', async () => {
-    mockCheckTransfer.mockResolvedValue({
-      kind: 'rejected', code: Codes.TRANSFER_REJECTED, reason: 'wrong order id',
-      requirementsBody: { x402Version: 2, error: 'PAYMENT-SIGNATURE header is required', accepts: [] },
-    });
-    const verifyTransfer = jest.fn();
-    const mw = x402Middleware({ ...baseOpts, verifyTransfer });
-    const res = mockRes();
-    await mw(mockReq({ headers: { 'payment-signature': 'AAA' } }), res as unknown as Response, jest.fn());
-
-    expect(mockProcess).not.toHaveBeenCalled();
-    expect(res.statusCode).toBe(402);
-    expect(String((res.body as { error: string }).error)).toMatch(/transfer_rejected.*wrong order id/);
-    const arg = mockCheckTransfer.mock.calls[0]![0] as { paymentHeader: string; verifyTransfer: unknown };
-    expect(arg.paymentHeader).toBe('AAA');
-    expect(arg.verifyTransfer).toBe(verifyTransfer);
+  it('replaces the body with a 402 when settlement fails', async () => {
+    const facilitator = fakeFacilitator();
+    const failed: SettlementResponse = {
+      success: false, errorReason: Codes.PENDING, transaction: 'ab'.repeat(32), network: NETWORK_PREPROD,
+    };
+    facilitator.settle.mockResolvedValue(failed);
+    const res = await paidGet('/api/short', { facilitator });
+    expect(res.status).toBe(402);
+    expect(decodeHeader(res.headers.get('payment-response'))).toEqual(failed);
+    // Parses only if the stale Content-Length of the 1-byte body was dropped.
+    const body = await res.json() as PaymentRequired;
+    expect(body.error).toContain(Codes.PENDING);
+    expect(decodeHeader<PaymentRequired>(res.headers.get('payment-required')).error).toBe(body.error);
   });
 
-  it('runs the facilitator when the check passes', async () => {
-    mockCheckTransfer.mockResolvedValue(null);
-    mockProcess.mockResolvedValue(accepted);
-    const mw = x402Middleware({ ...baseOpts, verifyTransfer: jest.fn() });
-    const next = jest.fn();
-    await mw(mockReq({ headers: { 'payment-signature': 'AAA' } }), mockRes() as unknown as Response, next);
-    expect(mockProcess).toHaveBeenCalledTimes(1);
-    expect(next).toHaveBeenCalledWith();
+  it('answers 500 when settle throws', async () => {
+    const facilitator = fakeFacilitator();
+    facilitator.settle.mockRejectedValue(new Error('network down'));
+    const res = await paidGet('/api/send', { facilitator });
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: 'x402 settlement error' });
   });
 
-  it('skips the check when no hook is set', async () => {
-    mockProcess.mockResolvedValue(accepted);
-    const mw = x402Middleware(baseOpts);
-    await mw(mockReq({ headers: { 'payment-signature': 'AAA' } }), mockRes() as unknown as Response, jest.fn());
-    expect(mockCheckTransfer).not.toHaveBeenCalled();
+  it('keeps the headers the handler set when settlement succeeds', async () => {
+    const res = await paidGet('/api/csv', { facilitator: fakeFacilitator() });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('text/csv; charset=utf-8');
+    expect(res.headers.get('set-cookie')).toBe('session=abc; Path=/');
+    expect(res.headers.get('cache-control')).toBe('public, max-age=3600');
+    expect(res.headers.get('content-disposition')).toBe('attachment; filename="quotes.csv"');
+    expect(res.headers.get('etag')).toBe('W/"handler-etag"');
+    expect(res.headers.get('x-request-id')).toBe('req-1');
+    expect(res.headers.get('payment-response')).toBeTruthy();
+    expect(await res.text()).toBe('a;b\n1;2\n');
   });
-});
 
-describe('x402Middleware, facilitator injection', () => {
-  it('uses the injected facilitator instead of the default localFacilitator', async () => {
-    // The module-level mock of `verify.process` would normally catch
-    // the default path. A custom facilitator must bypass it entirely.
-    const customVerifyAndSettle = jest.fn().mockResolvedValue({
-      kind: 'rejected',
-      code: 'wrong_recipient',
-      reason: 'custom-fac saw nope',
-      requirementsBody: { x402Version: 2, accepts: [] },
-    });
-    const mw = x402Middleware({
-      ...baseOpts,
-      facilitator: { verifyAndSettle: customVerifyAndSettle },
-    });
-    const next = jest.fn();
-    const res = mockRes();
-    await mw(mockReq({ headers: { 'payment-signature': 'AAA' } }), res as unknown as Response, next);
+  /** None of the handler's headers may describe the answer that replaced its response. */
+  function expectHandlerHeadersGone(res: Response): void {
+    expect(res.headers.get('content-type')).toMatch(/^application\/json/);
+    expect(res.headers.get('set-cookie')).toBeNull();
+    expect(res.headers.get('cache-control')).toBeNull();
+    expect(res.headers.get('content-disposition')).toBeNull();
+    expect(res.headers.get('etag')).not.toBe('W/"handler-etag"');
+    expect(res.headers.get('x-request-id')).toBe('req-1');
+  }
 
-    expect(customVerifyAndSettle).toHaveBeenCalledTimes(1);
-    expect(mockProcess).not.toHaveBeenCalled();       // default path skipped
-    expect(res.statusCode).toBe(402);
-    expect(next).not.toHaveBeenCalled();
+  it('drops every header the handler set when a failed settlement replaces the response', async () => {
+    const facilitator = fakeFacilitator();
+    const failed: SettlementResponse = {
+      success: false, errorReason: Codes.SUBMIT_FAILED, transaction: '', network: NETWORK_PREPROD,
+    };
+    facilitator.settle.mockResolvedValue(failed);
+    const res = await paidGet('/api/csv', { facilitator });
+    expect(res.status).toBe(402);
+    expectHandlerHeadersGone(res);
+    expect(decodeHeader(res.headers.get('payment-response'))).toEqual(failed);
+    const required = decodeHeader<PaymentRequired>(res.headers.get('payment-required'));
+    expect(await res.json()).toEqual(required);
+  });
+
+  it('drops every header the handler set when settle throws', async () => {
+    const facilitator = fakeFacilitator();
+    facilitator.settle.mockRejectedValue(new Error('network down'));
+    const res = await paidGet('/api/csv', { facilitator });
+    expect(res.status).toBe(500);
+    expectHandlerHeadersGone(res);
+    expect(res.headers.get('payment-response')).toBeNull();
+    expect(await res.json()).toEqual({ error: 'x402 settlement error' });
+  });
+
+  it('runs onAccepted after settlement with the claim and request', async () => {
+    const facilitator = fakeFacilitator();
+    const onAccepted = jest.fn();
+    await paidGet('/api/send', { facilitator, onAccepted });
+    expect(onAccepted).toHaveBeenCalledTimes(1);
+    const [claim, req] = onAccepted.mock.calls[0]!;
+    expect((claim as PaymentClaim).resourceUrl).toBe('/api/send');
+    expect((req as Request).originalUrl).toBe('/api/send');
+    expect(facilitator.settle.mock.invocationCallOrder[0]!).toBeLessThan(onAccepted.mock.invocationCallOrder[0]!);
+  });
+
+  it('still answers 200 when onAccepted throws', async () => {
+    const res = await paidGet('/api/send', {
+      facilitator: fakeFacilitator(),
+      onAccepted: () => { throw new Error('audit DB down'); },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('hello');
+  });
+
+  it('answers 402 without running the handler when verify fails', async () => {
+    const facilitator = fakeFacilitator();
+    facilitator.verify.mockResolvedValue({ isValid: false, invalidReason: Codes.REPLAY });
+    const res = await paidGet('/api/json', { facilitator });
+    expect(res.status).toBe(402);
+    expect(decodeHeader<PaymentRequired>(res.headers.get('payment-required')).error).toContain(Codes.REPLAY);
+    expect(facilitator.settle).not.toHaveBeenCalled();
+  });
+
+  it('answers 500 when verify throws', async () => {
+    const facilitator = fakeFacilitator();
+    facilitator.verify.mockRejectedValue(new Error('facilitator unreachable'));
+    const res = await paidGet('/api/json', { facilitator });
+    expect(res.status).toBe(500);
   });
 });

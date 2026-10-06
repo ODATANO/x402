@@ -12,9 +12,23 @@
  * `bridge.parseTransaction` after their `resetAllMocks()`.
  */
 
+/** core's real, pure witness check. */
+export function realVerifyTxWitnesses(signedTxCbor: string): unknown {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { verifyTxWitnesses } = jest.requireActual('@odatano/core/srv/blockchain/signing/signature-verifier');
+  return verifyTxWitnesses(signedTxCbor);
+}
+
+/** Witness check result for a tx signed by the test buyer key. */
+export function buyerSignedWitnesses() {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { BUYER_VKH } = jest.requireActual('./constants');
+  return { valid: true, txBodyHash: null, signerKeyHashes: [BUYER_VKH as string], errors: [] as string[] };
+}
+
 /**
  * Drop-in replacement for the `@odatano/core` barrel exposing parse plus
- * the two pure script helpers as mocks.
+ * the pure script and witness helpers as mocks.
  */
 export function coreParseMock() {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -27,6 +41,7 @@ export function coreParseMock() {
     getCardanoTxBuilder: jest.fn(),
     applyScriptParameters: jest.fn(),
     plutusScriptHash: jest.fn(),
+    verifyTxWitnesses: jest.fn(realVerifyTxWitnesses),
   };
 }
 

@@ -1,177 +1,144 @@
 /**
- * Tests for the CAP-backed grants module.
- *
- * INSERT / SELECT are CDS globals; @sap/cds places them on globalThis
- * the moment it is required. We stub them per-test so we can drive
- * success, DB failure, and lookup outcomes deterministically.
+ * Grants against a real in-memory sqlite: issuing a token, looking it up
+ * by route and expiry, and the transaction the row is written in.
  */
 
-import '@sap/cds'; // ensures globals exist before we override
+import cds from '@sap/cds';
 import {
-  DEFAULT_GRANTS_ENTITY,
-  DEFAULT_GRANT_TTL_SECONDS,
-  resolveGrantsEntity,
-  resolveGrantTtl,
   issueGrant,
   lookupGrant,
+  resolveGrantTtl,
+  DEFAULT_GRANTS_ENTITY,
+  DEFAULT_GRANT_TTL_SECONDS,
 } from '../../srv/middleware/grants';
+import { deployTestDb, closeTestDb, rowsOf } from '../fixtures/db';
+import { BUYER_ADDR, SELLER_ADDR, NETWORK_PREPROD } from '../fixtures/constants';
 import type { PaymentClaim } from '../../srv/core/types';
 
-const baseClaim: PaymentClaim = {
-  txHash:      'ab'.repeat(32),
-  payerAddr:   'addr_test1qpayer',
-  payTo:       'addr_test1qseller',
-  asset:       'lovelace',
-  amountUnits: '1000000',
-  network:     'cardano:preprod',
-  nonceRef:    'ab'.repeat(32) + '#0',
-};
+const ROUTE = '/odata/v4/prices/Quotes';
 
-// `INSERT` / `SELECT` are getter-only globals defined by @sap/cds, so
-// plain assignment fails. We redefine them per-test with a configurable
-// data descriptor; an afterEach restores the original getter descriptors.
-const insertDesc = Object.getOwnPropertyDescriptor(globalThis, 'INSERT');
-const selectDesc = Object.getOwnPropertyDescriptor(globalThis, 'SELECT');
-
-function setINSERT(impl: unknown) {
-  Object.defineProperty(globalThis, 'INSERT', { value: impl, configurable: true, writable: true });
-}
-function setSELECT(impl: unknown) {
-  Object.defineProperty(globalThis, 'SELECT', { value: impl, configurable: true, writable: true });
+function claim(payerAddr: string | undefined = BUYER_ADDR): PaymentClaim {
+  return {
+    txHash:      'b1'.repeat(32),
+    amountUnits: '1000000',
+    network:     NETWORK_PREPROD,
+    unit:        '',
+    asset:       'lovelace',
+    payTo:       SELLER_ADDR,
+    resourceUrl: ROUTE,
+    nonceRef:    `${'dd'.repeat(32)}#0`,
+    ...(payerAddr ? { payerAddr } : {}),
+  };
 }
 
-afterEach(() => {
-  if (insertDesc) Object.defineProperty(globalThis, 'INSERT', insertDesc);
-  if (selectDesc) Object.defineProperty(globalThis, 'SELECT', selectDesc);
-});
+const grantOf = async (token: string) =>
+  (await rowsOf<Record<string, unknown>>(DEFAULT_GRANTS_ENTITY)).find(r => r.token === token);
 
-describe('resolveGrantsEntity', () => {
-  it('returns null when grants is undefined / false', () => {
-    expect(resolveGrantsEntity(undefined)).toBeNull();
-    expect(resolveGrantsEntity(false)).toBeNull();
-  });
+let warn: jest.SpyInstance;
 
-  it('returns the default entity when grants is `true`', () => {
-    expect(resolveGrantsEntity(true)).toBe(DEFAULT_GRANTS_ENTITY);
-  });
-
-  it('returns a custom entity name when provided', () => {
-    expect(resolveGrantsEntity({ entity: 'my.ns.MyGrants' })).toBe('my.ns.MyGrants');
-  });
-
-  it('falls back to the default entity when only ttl is set', () => {
-    expect(resolveGrantsEntity({ ttlSeconds: 60 })).toBe(DEFAULT_GRANTS_ENTITY);
-  });
-});
+beforeAll(deployTestDb);
+afterAll(closeTestDb);
+beforeEach(() => { warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined); });
+afterEach(() => { warn.mockRestore(); });
 
 describe('resolveGrantTtl', () => {
-  it('returns the default when grants is undefined / true', () => {
+  it('is the default unless ttlSeconds is set', () => {
     expect(resolveGrantTtl(undefined)).toBe(DEFAULT_GRANT_TTL_SECONDS);
     expect(resolveGrantTtl(true)).toBe(DEFAULT_GRANT_TTL_SECONDS);
-  });
-
-  it('returns the override when set', () => {
-    expect(resolveGrantTtl({ ttlSeconds: 60 })).toBe(60);
-  });
-
-  it('falls back to default when only entity is set', () => {
     expect(resolveGrantTtl({ entity: 'x' })).toBe(DEFAULT_GRANT_TTL_SECONDS);
+    expect(resolveGrantTtl({ ttlSeconds: 60 })).toBe(60);
   });
 });
 
 describe('issueGrant', () => {
-  it('inserts a row and returns the token + ISO expiry', async () => {
-    const entries = jest.fn().mockResolvedValue(undefined);
-    const into    = jest.fn(() => ({ entries }));
-    setINSERT({ into });
+  it('returns a token with its expiry and stores the row', async () => {
+    const before = Date.now();
+    const grant = await issueGrant(DEFAULT_GRANTS_ENTITY, claim(), ROUTE, 60);
+    expect(grant!.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    const expires = Date.parse(grant!.expiresAt);
+    expect(expires).toBeGreaterThanOrEqual(before + 60_000);
+    expect(expires).toBeLessThanOrEqual(Date.now() + 60_000);
 
-    const result = await issueGrant('odatano.x402.X402Grants', baseClaim, '/api/foo', 60);
-    expect(result).not.toBeNull();
-    expect(result!.token).toMatch(/^[A-Za-z0-9_-]+$/);
-    expect(new Date(result!.expiresAt).toString()).not.toBe('Invalid Date');
-    expect(into).toHaveBeenCalledWith('odatano.x402.X402Grants');
-    const row = entries.mock.calls[0][0];
-    expect(row.token).toBe(result!.token);
-    expect(row.route).toBe('/api/foo');
-    expect(row.payerAddr).toBe(baseClaim.payerAddr);
-    expect(row.txHash).toBe(baseClaim.txHash);
-    expect(typeof row.ID).toBe('string');
+    const row = await grantOf(grant!.token);
+    expect(row).toMatchObject({
+      token:     grant!.token,
+      route:     ROUTE,
+      payerAddr: BUYER_ADDR,
+      txHash:    'b1'.repeat(32),
+      asset:     'lovelace',
+      network:   NETWORK_PREPROD,
+    });
+    expect(row!.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(Date.parse(String(row!.expiresAt))).toBe(expires);
+    expect(Number.isNaN(Date.parse(String(row!.issuedAt)))).toBe(false);
   });
 
-  it('writes payerAddr=null when the claim has none', async () => {
-    const entries = jest.fn().mockResolvedValue(undefined);
-    setINSERT({ into: () => ({ entries }) });
-
-    const claim: PaymentClaim = { ...baseClaim, payerAddr: undefined };
-    await issueGrant(DEFAULT_GRANTS_ENTITY, claim, '/api/foo', 60);
-    expect(entries.mock.calls[0][0].payerAddr).toBeNull();
+  it('writes payerAddr null when the claim has none', async () => {
+    const grant = await issueGrant(DEFAULT_GRANTS_ENTITY, claim(''), ROUTE, 60);
+    expect((await grantOf(grant!.token))!.payerAddr).toBeNull();
   });
 
-  it('returns null and logs when INSERT fails', async () => {
-    setINSERT({ into: () => ({ entries: () => Promise.reject(new Error('db down')) }) });
-    const out = await issueGrant(DEFAULT_GRANTS_ENTITY, baseClaim, '/api/foo', 60);
-    expect(out).toBeNull();
+  it('issues a different token every time', async () => {
+    const a = await issueGrant(DEFAULT_GRANTS_ENTITY, claim(), ROUTE, 60);
+    const b = await issueGrant(DEFAULT_GRANTS_ENTITY, claim(), ROUTE, 60);
+    expect(a!.token).not.toBe(b!.token);
   });
 
-  it('handles non-Error rejection objects without crashing', async () => {
-    setINSERT({ into: () => ({ entries: () => Promise.reject('weird thing') }) });
-    const out = await issueGrant(DEFAULT_GRANTS_ENTITY, baseClaim, '/api/foo', 60);
-    expect(out).toBeNull();
+  it('commits on its own, so the grant survives a failing outer transaction', async () => {
+    let token = '';
+    await expect(cds.tx(async () => {
+      token = (await issueGrant(DEFAULT_GRANTS_ENTITY, claim(), ROUTE, 60))!.token;
+      throw new Error('request failed');
+    })).rejects.toThrow('request failed');
+    expect(await grantOf(token)).toBeDefined();
+  });
+
+  it('returns null and logs when the insert fails', async () => {
+    expect(await issueGrant('no.such.Entity', claim(), ROUTE, 60)).toBeNull();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]!.join(' ')).toContain('no.such.Entity');
   });
 });
 
 describe('lookupGrant', () => {
-  function selectReturning(row: { expiresAt?: string } | null) {
-    return {
-      one: {
-        from: () => ({ where: () => Promise.resolve(row) }),
-      },
-    };
-  }
-
-  it('short-circuits as not-found for empty tokens without touching SELECT', async () => {
-    const from = jest.fn();
-    setSELECT({ one: { from } });
-    const out = await lookupGrant(DEFAULT_GRANTS_ENTITY, '', '/api/foo');
-    expect(out).toEqual({ kind: 'not-found' });
-    expect(from).not.toHaveBeenCalled();
+  it('finds a live grant for its route', async () => {
+    const grant = await issueGrant(DEFAULT_GRANTS_ENTITY, claim(), ROUTE, 60);
+    expect(await lookupGrant(DEFAULT_GRANTS_ENTITY, grant!.token, ROUTE)).toEqual({ kind: 'valid' });
   });
 
-  it('returns valid when a row with future expiry exists', async () => {
-    const future = new Date(Date.now() + 60_000).toISOString();
-    setSELECT(selectReturning({ expiresAt: future }));
-    const out = await lookupGrant(DEFAULT_GRANTS_ENTITY, 'tok', '/api/foo');
-    expect(out).toEqual({ kind: 'valid' });
+  it('does not unlock another route', async () => {
+    const grant = await issueGrant(DEFAULT_GRANTS_ENTITY, claim(), ROUTE, 60);
+    expect(await lookupGrant(DEFAULT_GRANTS_ENTITY, grant!.token, '/odata/v4/prices/getBestPrice'))
+      .toEqual({ kind: 'not-found' });
   });
 
-  it('returns expired when the row is past its expiry', async () => {
-    const past = new Date(Date.now() - 60_000).toISOString();
-    setSELECT(selectReturning({ expiresAt: past }));
-    const out = await lookupGrant(DEFAULT_GRANTS_ENTITY, 'tok', '/api/foo');
-    expect(out).toEqual({ kind: 'expired' });
+  it('reports a grant past its expiry as expired', async () => {
+    const grant = await issueGrant(DEFAULT_GRANTS_ENTITY, claim(), ROUTE, -60);
+    expect(await lookupGrant(DEFAULT_GRANTS_ENTITY, grant!.token, ROUTE)).toEqual({ kind: 'expired' });
   });
 
-  it('returns expired when expiresAt is unparseable', async () => {
-    setSELECT(selectReturning({ expiresAt: 'not-a-date' }));
-    const out = await lookupGrant(DEFAULT_GRANTS_ENTITY, 'tok', '/api/foo');
-    expect(out).toEqual({ kind: 'expired' });
+  it('reports a grant without expiry as expired', async () => {
+    await cds.tx(tx => tx.run(cds.ql.INSERT.into(DEFAULT_GRANTS_ENTITY).entries({
+      id: cds.utils.uuid(), token: 'no-expiry', route: ROUTE,
+    })));
+    expect(await lookupGrant(DEFAULT_GRANTS_ENTITY, 'no-expiry', ROUTE)).toEqual({ kind: 'expired' });
   });
 
-  it('returns expired when the row has no expiresAt', async () => {
-    setSELECT(selectReturning({}));
-    const out = await lookupGrant(DEFAULT_GRANTS_ENTITY, 'tok', '/api/foo');
-    expect(out).toEqual({ kind: 'expired' });
+  it('reports an unknown token as not-found', async () => {
+    expect(await lookupGrant(DEFAULT_GRANTS_ENTITY, 'unknown-token', ROUTE)).toEqual({ kind: 'not-found' });
+    expect(warn).not.toHaveBeenCalled();
   });
 
-  it('returns not-found when no row matches', async () => {
-    setSELECT(selectReturning(null));
-    const out = await lookupGrant(DEFAULT_GRANTS_ENTITY, 'tok', '/api/foo');
-    expect(out).toEqual({ kind: 'not-found' });
+  it('answers not-found for an empty token without a query', async () => {
+    const tx = jest.spyOn(cds, 'tx');
+    expect(await lookupGrant(DEFAULT_GRANTS_ENTITY, '', ROUTE)).toEqual({ kind: 'not-found' });
+    expect(tx).not.toHaveBeenCalled();
+    tx.mockRestore();
   });
 
-  it('treats DB errors as not-found (logs + falls through)', async () => {
-    setSELECT({ one: { from: () => ({ where: () => Promise.reject(new Error('db down')) }) } });
-    const out = await lookupGrant(DEFAULT_GRANTS_ENTITY, 'tok', '/api/foo');
-    expect(out).toEqual({ kind: 'not-found' });
+  it('answers not-found and logs when the query fails', async () => {
+    expect(await lookupGrant('no.such.Entity', 'tok', ROUTE)).toEqual({ kind: 'not-found' });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]!.join(' ')).toContain('no.such.Entity');
   });
 });

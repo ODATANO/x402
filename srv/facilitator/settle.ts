@@ -1,120 +1,225 @@
 /**
- * Submit a signed payment tx to Cardano and confirm settlement.
+ * Facilitator `/settle` for Cardano `exact`.
  *
- * Confirmation policy (v2 spec): accept after first chain sighting.
- * `mempool` status is explicitly discouraged in v2, Cardano's
- * Ouroboros Praos has probabilistic finality, so "in mempool" gives
- * no economic guarantee. We poll for first-chain-sighting via
- * `getTransactionByHash` (resolves to non-null when Blockfrost / Koios
- * has indexed the tx; that's effectively ≥1 confirmation).
- *
- * Confirmation budget: middleware paths use ~60s (covers preprod's
- * worst-case block time of ~20s plus indexer lag). On timeout we
- * return `{ confirmed: false, pending: true }`, the spec contract is
- * that the buyer retries with the same `PAYMENT-SIGNATURE`. Replay
- * defense (on-chain via UTxO nonce) ensures only one retry actually
- * gets served.
+ * Verifies, claims the transaction id, submits, then waits (bounded) for
+ * the evidence `confirmationPolicy` requires. Below the threshold it
+ * answers `settlement_pending`; a retry with the same payload takes the
+ * claim over and resumes. A transaction a backend took is never submitted
+ * again. A second settle of a settled or in-progress transaction answers
+ * `duplicate_settlement`.
  */
 
+import cds from '@sap/cds';
 import * as bridge from '../bridge';
-import { Codes, type X402Code } from '../core/errors';
+import { decodePayment } from '../core/decode';
+import { Codes, X402Error } from '../core/errors';
+import { findAcceptedRequirements } from '../core/match';
+import { matchOutput } from '../core/validate';
+import { checkPaymentPayload } from '../core/payload';
+import { runVerify, canonicalRequirements, type VerifyContext } from './verify';
+import { isResumable, type SettlementRecord } from './store';
+import type {
+  DecodedPayment,
+  PaymentPayload,
+  PaymentRequirements,
+  SettlementEvidence,
+  SettlementResponse,
+} from '../core/types';
 
-export interface SettleArgs {
-  /** Hex of the signed tx (NOT base64). */
-  signedTxCborHex: string;
-  /** Locally-computed tx hash from the FixedTransaction; we cross-check submit's response. */
-  expectedTxHash: string;
-  pollBudgetMs?: number;
-  pollIntervalMs?: number;
+const log = cds.log('x402');
+
+/** Indexer lag after the TTL before a missing transaction counts as never landed. */
+const EXPIRY_GRACE_MS = 120_000;
+
+/** How long past its wait a settle call keeps the claim before a retry may take over. */
+const LEASE_MARGIN_MS = 30_000;
+
+export interface SettleContext extends VerifyContext {
+  /** How long one settle call waits for the required evidence. */
+  pollBudgetMs: number;
+  pollIntervalMs: number;
+  /** Kept past the TTL so a late claim cannot reopen a settled transaction. */
+  claimGraceMs: number;
 }
 
-export interface SettleResult {
-  confirmed: boolean;
-  /** True iff submit succeeded but the tx is not yet indexed. */
-  pending?: boolean;
-  txHash?: string;
-  code?: X402Code;
-  reason?: string;
+function response(
+  requirements: PaymentRequirements,
+  fields: Omit<SettlementResponse, 'network'>,
+): SettlementResponse {
+  return { ...fields, network: requirements.network };
 }
 
-/**
- * Patterns surfaced by the submit step that mean "the tx is already
- * known to the network", either in mempool or already mined. In
- * both cases we should NOT treat as failure; we should fall through
- * to polling.
- *
- *   - Blockfrost:    "Transaction is already in the mempool"
- *   - Cardano node:  "ConwayMempoolFailure ... Transaction has probably already been included"
- *   - Ouroboros:     "BadInputsUTxO" / "all inputs are spent"  (already mined)
- *   - Generic:       "transaction already exists"
- *
- * The submit step's failure modes are heterogeneous across backends;
- * regex matching is the only portable detector.
- */
-const TX_ALREADY_KNOWN_RE = new RegExp(
-  [
-    'already (in (the )?(mempool|chain)|exists|been included)',
-    'transaction has probably already been included',
-    'all inputs are spent',
-    'badinputsutxo',
-    'valuenotconserved',
-    'inputsdepleted',
-  ].join('|'),
-  'i',
-);
+function failure(requirements: PaymentRequirements, errorReason: string, transaction = '', payer?: string): SettlementResponse {
+  return response(requirements, {
+    success: false,
+    errorReason,
+    transaction,
+    ...(payer ? { payer } : {}),
+  });
+}
 
-export async function settle({
-  signedTxCborHex,
-  expectedTxHash,
-  pollBudgetMs = 60_000,
-  pollIntervalMs = 2_500,
-}: SettleArgs): Promise<SettleResult> {
-  if (!signedTxCborHex) throw new TypeError('settle: signedTxCborHex required');
-  if (!expectedTxHash)  throw new TypeError('settle: expectedTxHash required');
+type Observation =
+  | { kind: 'reached'; evidence: SettlementEvidence }
+  | { kind: 'waiting'; evidence: SettlementEvidence }
+  /** The validity window closed and the transaction never landed. */
+  | { kind: 'expired' }
+  /** It landed as a failed script run: collateral taken, payment output not created. */
+  | { kind: 'scriptFailed' };
 
-  // 1. Submit
-  let submittedHash: string | undefined;
-  try {
-    submittedHash = await bridge.submitTransaction(signedTxCborHex);
-  } catch (err) {
-    const msg = String((err as { message?: unknown })?.message ?? err ?? '');
-    if (TX_ALREADY_KNOWN_RE.test(msg)) {
-      // Idempotency: another submit of the same CBOR already happened.
-      // Proceed to polling.
-      submittedHash = expectedTxHash;
-    } else {
-      return {
-        confirmed: false,
-        code:      Codes.SUBMIT_FAILED,
-        reason:    msg.slice(0, 200),
-      };
+/** Polls until the policy is met, the budget runs out, or the transaction can no longer pay. */
+async function observe(
+  decoded: DecodedPayment,
+  requirements: PaymentRequirements,
+  required: number,
+  ctx: SettleContext,
+): Promise<Observation> {
+  const deadline = Date.now() + ctx.pollBudgetMs;
+  let evidence: SettlementEvidence = { status: 'pending', confirmations: -1, transactionId: decoded.txHash };
+  for (;;) {
+    const tx = await bridge.getTransactionByHash(decoded.txHash);
+    if (tx?.spendsCollaterals === true) return { kind: 'scriptFailed' };
+    if (tx && typeof tx.blockHeight === 'number') {
+      const confirmations = Math.max(0, (await bridge.getTipHeight()) - tx.blockHeight);
+      evidence = { status: 'confirmed', confirmations, transactionId: decoded.txHash };
+      if (confirmations >= required) return { kind: 'reached', evidence };
+    } else if (
+      decoded.ttlSlot !== null
+      && Date.now() > bridge.slotToPosixMs(requirements.network, decoded.ttlSlot) + EXPIRY_GRACE_MS
+    ) {
+      return { kind: 'expired' };
     }
+    if (Date.now() + ctx.pollIntervalMs > deadline) {
+      return { kind: 'waiting', evidence: { ...evidence, status: 'pending' } };
+    }
+    await new Promise(r => setTimeout(r, ctx.pollIntervalMs));
   }
+}
 
-  // Cross-check: backend's hash must match our locally-computed one.
-  // If it doesn't, something is structurally off, bail loudly.
-  if (submittedHash && submittedHash.toLowerCase() !== expectedTxHash.toLowerCase()) {
-    return {
-      confirmed: false,
-      code:      Codes.SUBMIT_FAILED,
-      reason:    `submit returned hash ${submittedHash} but tx hashes to ${expectedTxHash}`,
-    };
+export async function runSettle(
+  payload: PaymentPayload,
+  offered: PaymentRequirements,
+  ctx: SettleContext,
+): Promise<SettlementResponse> {
+  const requirements = canonicalRequirements(offered);
+  let decoded: DecodedPayment;
+  try {
+    decoded = decodePayment(checkPaymentPayload(payload));
+  } catch (err) {
+    if (err instanceof X402Error) return failure(requirements, err.code);
+    throw err;
   }
+  const txId = decoded.txHash;
+  const required = requirements.extra?.confirmationPolicy?.l1Confirmations ?? 1;
+  const leaseUntil = () => Date.now() + ctx.pollBudgetMs + LEASE_MARGIN_MS;
+  let amount: string | undefined;
 
-  // 2. Poll for first chain sighting.
-  const deadline = Date.now() + pollBudgetMs;
-  while (Date.now() < deadline) {
-    const tx = await bridge.getTransactionByHash(expectedTxHash);
-    if (tx) return { confirmed: true, txHash: expectedTxHash };
-    await new Promise(r => setTimeout(r, pollIntervalMs));
-  }
-
-  // 3. Timed out.
-  return {
-    confirmed: false,
-    pending:   true,
-    txHash:    expectedTxHash,
-    code:      Codes.PENDING,
-    reason:    'transaction submitted but not yet visible on chain',
+  /**
+   * Take over a record nobody works on, or refuse. A record another call
+   * holds, or a settled one, is a second delivery attempt. A resumed
+   * transaction must still pay these requirements.
+   */
+  const takeOver = async (record: SettlementRecord): Promise<SettlementResponse | null> => {
+    const payer = record.response?.payer;
+    if (record.state === 'failed' && record.response) return record.response;
+    if (isResumable(record)) {
+      if (!findAcceptedRequirements(payload.accepted, [requirements])) {
+        return failure(requirements, Codes.ACCEPTED_MISMATCH, txId, payer);
+      }
+      const paid = matchOutput(decoded, requirements);
+      if (!paid.ok) return failure(requirements, paid.code, txId, payer);
+      amount = paid.match.amountUnits;
+      if (await ctx.store.resume(txId, leaseUntil())) return null;
+    }
+    return failure(requirements, Codes.DUPLICATE_SETTLEMENT, txId, payer);
   };
+
+  let holding = false;
+  let payer: string | undefined;
+  try {
+    let record = await ctx.store.get(txId);
+    if (!record) {
+      const v = await runVerify(payload, requirements, ctx);
+      if (!v.response.isValid) {
+        return failure(requirements, v.response.invalidReason ?? Codes.UNEXPECTED_SETTLE_ERROR, '', v.response.payer);
+      }
+      payer = v.response.payer;
+      amount = v.match?.amountUnits;
+      const ttlMs = bridge.slotToPosixMs(requirements.network, decoded.ttlSlot!);
+      const claim = await ctx.store.claim(txId, ttlMs + ctx.claimGraceMs, leaseUntil());
+      if (!claim.claimed) record = claim.record;
+    }
+    if (record) {
+      const refused = await takeOver(record);
+      if (refused) return refused;
+      payer ??= record.response?.payer;
+    }
+    holding = true;
+
+    // A transaction no backend is known to have taken is submitted (again):
+    // the same bytes are harmless twice, and otherwise it could never land.
+    let broadcast = record?.broadcast ?? false;
+    if (!broadcast) {
+      const submitted = await bridge.trySubmit(decoded.txCborHex);
+      if (submitted.kind === 'unknown') {
+        log.warn(`submit of ${txId} had no clear answer, observing: ${submitted.reason}`);
+      } else if (submitted.kind === 'rejected' && !(await bridge.getTransactionByHash(txId))) {
+        log.warn(`ledger refused ${txId}: ${submitted.reason}`);
+        await ctx.store.release(txId);
+        holding = false;
+        return failure(requirements, Codes.SUBMIT_FAILED, '', payer);
+      } else {
+        broadcast = true;
+        await ctx.store.update(txId, { broadcast: true });
+      }
+    }
+
+    const base = {
+      transaction: txId,
+      ...(payer ? { payer } : {}),
+      ...(amount ? { amount } : {}),
+    };
+
+    // `-1` accepts the broadcast itself; without a clear answer to the
+    // submit, wait for the block instead.
+    if (required === -1 && broadcast) {
+      const done = response(requirements, {
+        success: true, ...base, extra: { status: 'mempool', confirmations: -1, transactionId: txId },
+      });
+      await ctx.store.update(txId, { state: 'settled', response: done });
+      return done;
+    }
+
+    const o = await observe(decoded, requirements, Math.max(required, 0), ctx);
+    if (o.kind === 'reached') {
+      const done = response(requirements, { success: true, ...base, extra: o.evidence });
+      await ctx.store.update(txId, { state: 'settled', response: done });
+      return done;
+    }
+    if (o.kind === 'expired' || o.kind === 'scriptFailed') {
+      const code = o.kind === 'expired' ? Codes.SETTLEMENT_FAILED : Codes.PHASE2_INVALID;
+      const failed = failure(requirements, code, txId, payer);
+      await ctx.store.update(txId, { state: 'failed', response: failed });
+      return failed;
+    }
+    const pending = response(requirements, {
+      success: false, errorReason: Codes.PENDING, ...base, extra: o.evidence,
+    });
+    await ctx.store.update(txId, { state: 'pending', response: pending });
+    return pending;
+  } catch (err) {
+    log.error('settle failed', err);
+    if (!holding) return failure(requirements, Codes.UNEXPECTED_SETTLE_ERROR, '');
+    // The transaction may be on its way. The claim goes back to `pending`
+    // and the answer says so, so the buyer re-sends the same header and a
+    // retry resumes it.
+    const pending = response(requirements, {
+      success: false,
+      errorReason: Codes.PENDING,
+      transaction: txId,
+      ...(payer ? { payer } : {}),
+      extra: { status: 'pending', confirmations: -1, transactionId: txId },
+    });
+    await ctx.store.update(txId, { state: 'pending', response: pending }).catch(() => undefined);
+    return pending;
+  }
 }

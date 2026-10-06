@@ -39,30 +39,14 @@ export type VerifyConfirmedResult =
   | { ok: true; txHash: string; amountUnits: string }
   | { ok: false; code: X402Code; reason: string };
 
-interface TxOutputLite {
-  address?: string;
-  lovelace?: string | number;
-  assets?: Array<{ unit?: string; quantity?: string | number }>;
-}
-interface TxLite { hash?: string; outputs?: TxOutputLite[] }
-
-function totalPaidToAddress(
-  tx: TxLite,
-  payTo: string,
-  isLovelace: boolean,
-  unit: string,
-): bigint {
+/** Amount of the asset paid to `payTo`, summed over the outputs the transaction created. */
+function totalPaidToAddress(tx: bridge.ChainTx, payTo: string, isLovelace: boolean, unit: string): bigint {
   let total = 0n;
-  for (const o of tx.outputs ?? []) {
+  for (const o of bridge.createdOutputs(tx)) {
     if (o.address !== payTo) continue;
-    if (isLovelace) {
-      total += BigInt(o.lovelace ?? '0');
-    } else {
-      for (const a of o.assets ?? []) {
-        if (String(a.unit ?? '').toLowerCase() === unit) {
-          total += BigInt(a.quantity ?? '0');
-        }
-      }
+    for (const a of o.amount) {
+      const matches = isLovelace ? a.unit === 'lovelace' : a.unit.toLowerCase() === unit;
+      if (matches) total += BigInt(a.quantity);
     }
   }
   return total;
@@ -85,9 +69,9 @@ export async function verifyConfirmedPayment(
   catch (e) { return { ok: false, code: Codes.INVALID_ASSET_FORMAT, reason: (e as Error).message }; }
 
   // 1. Fetch from chain.
-  let tx: TxLite | null;
+  let tx: bridge.ChainTx | null;
   try {
-    tx = await bridge.getTransactionByHash(args.txHash) as TxLite | null;
+    tx = await bridge.getTransactionByHash(args.txHash);
   } catch (err) {
     return {
       ok: false,

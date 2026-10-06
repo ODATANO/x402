@@ -39,6 +39,11 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Type-check sources and tests
+        # ts-jest transpiles each file on its own (isolatedModules), so it
+        # never reports type errors; this step does.
+        run: npm run typecheck
+
       - name: Type-check + build
         # tsc -p tsconfig.build.json emits .js/.d.ts next to .ts.
         # We don't ship those emits from CI; the step just verifies

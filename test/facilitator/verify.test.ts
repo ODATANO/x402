@@ -1,446 +1,260 @@
 /**
- * End-to-end orchestrator test with a fully-mocked bridge.
- *
- * Each test drives one rejection branch + the happy path, so we know
- * the pipeline orders checks correctly:
- *   missing header → decode → validate → nonce → settle → onAccepted.
+ * Facilitator `/verify` (runVerify) against a mocked chain. The payment tx
+ * is real CBOR built and signed with buildooor; the bridge serves the
+ * nonce's funding tx, slots and fee parameters.
  */
 
 import { bridgeFactory } from '../fixtures/mock-bridge';
 jest.mock('../../srv/bridge', () => bridgeFactory());
 
 import * as bridge from '../../srv/bridge';
-import { process as verifyPayment, checkTransfer } from '../../srv/facilitator/verify';
-import {
-  buildPaymentRequirements,
-  buildPaymentRequirementsMulti,
-} from '../../srv/core/requirements';
+import { runVerify, type VerifyContext } from '../../srv/facilitator/verify';
+import { memorySettlementStore } from '../../srv/facilitator/store';
+import { buildRequirements } from '../../srv/core/requirements';
+import { parsePaymentPayload } from '../../srv/core/payload';
 import { Codes } from '../../srv/core/errors';
 import {
   BUYER_PRIV, BUYER_ADDR, SELLER_ADDR,
   NONCE_TX_HASH, NONCE_INDEX, NONCE_REF,
-  CURRENT_SLOT, FUTURE_SLOT,
+  CURRENT_SLOT, TTL_SLOT, MAX_TTL_SLOT,
   NETWORK_PREPROD,
-  USDM_PREPROD_ASSET, USDM_PREPROD_POLICY, USDM_NAME_HEX,
 } from '../fixtures/constants';
-import { buildBody, signTx } from '../fixtures/build-tx';
-import { buildEnvelope } from '../fixtures/envelope';
-import { realParseTransaction } from '../fixtures/core-parse-mock';
+import { buildBody, signTx, type TestOutput } from '../fixtures/build-tx';
+import { buildPaymentSignature } from '../fixtures/envelope';
+import { realParseTransaction, buyerSignedWitnesses } from '../fixtures/core-parse-mock';
+import type { PaymentPayload, PaymentRequirements } from '../../srv/core/types';
 
-const mockedBridge = jest.mocked(bridge);
+const mocked = jest.mocked(bridge);
 
-function happyEnvelope({
-  amount = '1000000',
-  outputAddr = SELLER_ADDR,
-}: { amount?: string; outputAddr?: string } = {}) {
+const PRICE = 2_000_000n;
+const FEE = 200_000n;
+const FUNDING = 10_000_000n;
+
+const requirements = (extra?: PaymentRequirements['extra']): PaymentRequirements => buildRequirements({
+  amount: PRICE, asset: 'lovelace', payTo: SELLER_ADDR, network: NETWORK_PREPROD,
+  ...(extra ? { extra } : {}),
+});
+
+/** A balanced payment: FUNDING in, PRICE to the seller, change back, FEE. */
+function payment(opts: {
+  outputs?: TestOutput[];
+  ttlSlot?: number;
+  req?: PaymentRequirements;
+} = {}): { payload: PaymentPayload; txHash: string; req: PaymentRequirements } {
+  const req = opts.req ?? requirements();
   const body = buildBody({
     inputs: [{ txHash: NONCE_TX_HASH, outputIndex: NONCE_INDEX }],
-    outputs: [{ address: outputAddr, lovelace: amount }],
-    ttlSlot: FUTURE_SLOT,
+    outputs: opts.outputs ?? [
+      { address: SELLER_ADDR, lovelace: PRICE.toString() },
+      { address: BUYER_ADDR, lovelace: (FUNDING - PRICE - FEE).toString() },
+    ],
+    fee: FEE.toString(),
+    ttlSlot: opts.ttlSlot ?? TTL_SLOT,
   });
   const signed = signTx(body, [BUYER_PRIV]);
-  return buildEnvelope({ txCborHex: signed.cborHex, nonceRef: NONCE_REF });
+  const header = buildPaymentSignature({ accepted: req, txCborHex: signed.cborHex, nonceRef: NONCE_REF });
+  return { payload: parsePaymentPayload(header), txHash: signed.txHash, req };
 }
 
-const requirementsBody = () => buildPaymentRequirements({
-  amount: '1000000',
-  asset: 'lovelace',
-  payTo: SELLER_ADDR,
-  network: NETWORK_PREPROD,
-  resource: '/r',
-});
+/** The tx that created the nonce UTxO, as core's getTransaction returns it. */
+function fundingTx(amount: Array<{ unit: string; quantity: string }> = [{ unit: 'lovelace', quantity: FUNDING.toString() }]) {
+  return {
+    hash: NONCE_TX_HASH, blockHeight: 90, blockTime: 1_700_000_000,
+    outputs: [{ address: BUYER_ADDR, amount, outputIndex: NONCE_INDEX }],
+  };
+}
+
+function ctx(allowMempoolConfirmation = false): VerifyContext {
+  return { store: memorySettlementStore(), allowMempoolConfirmation };
+}
 
 beforeEach(() => {
   jest.resetAllMocks();
-  // decode() runs through the mocked bridge, so wire its parseTransaction
-  // to the real (Buildooor) parser, resetAllMocks wiped the factory impl.
-  mockedBridge.parseTransaction.mockImplementation(
-    realParseTransaction as typeof bridge.parseTransaction,
-  );
-  // Sensible defaults; individual tests override.
-  mockedBridge.getCurrentSlot.mockResolvedValue(CURRENT_SLOT);
-  mockedBridge.isUtxoUnspent.mockResolvedValue(true);
-  mockedBridge.submitTransaction.mockResolvedValue('');
-  mockedBridge.getTransactionByHash.mockResolvedValue({} as unknown);
+  mocked.parseTransaction.mockImplementation(realParseTransaction as typeof bridge.parseTransaction);
+  mocked.verifyTxWitnesses.mockReturnValue(buyerSignedWitnesses());
+  mocked.createdOutputs.mockImplementation(tx => tx.outputs.filter(o => Boolean(o.isCollateral) === (tx.spendsCollaterals === true)));
+  mocked.getCurrentSlot.mockResolvedValue(CURRENT_SLOT);
+  mocked.posixToSlot.mockReturnValue(MAX_TTL_SLOT);
+  mocked.isUtxoUnspent.mockResolvedValue(true);
+  mocked.getFeeParameters.mockResolvedValue({ minFeeA: 44n, minFeeB: 155_381n, coinsPerUtxoByte: 4_310n });
+  mocked.getTransactionByHash.mockImplementation(async (hash: string) => (hash === NONCE_TX_HASH ? fundingTx() : null));
 });
 
-describe('verifyPayment, happy path', () => {
-  it('returns accepted + invokes onAccepted callback', async () => {
-    const onAccepted = jest.fn();
-    const envelope = happyEnvelope();
+describe('runVerify, valid payment', () => {
+  it('is valid and names the payer from the nonce output', async () => {
+    const { payload, req } = payment();
+    const r = await runVerify(payload, req, ctx());
+    expect(r.response).toEqual({ isValid: true, payer: BUYER_ADDR });
+    expect(r.match?.amountUnits).toBe(PRICE.toString());
+    expect(mocked.submitTransaction).not.toHaveBeenCalled();
+  });
 
-    // submit returns the locally-computed hash (round-trips through settle)
-    mockedBridge.submitTransaction.mockImplementation(async (cborHex) => {
-      // emulate the network echoing the same hash back
-      const { decode } = await import('../../srv/core/decode');
-      const decoded = decode(envelope);
-      expect(cborHex).toBe(decoded.txCborHex);
-      return decoded.txHash;
-    });
-    // The nonce's tx answers with the buyer's output; the payment tx just exists.
-    const { decode: decodeEnv } = await import('../../srv/core/decode');
-    const nonce = decodeEnv(envelope).nonce;
-    mockedBridge.getTransactionByHash.mockImplementation(async (hash: string) =>
-      hash === nonce.txHash
-        ? ({ hash, outputs: [{ address: 'addr_test1other', outputIndex: nonce.index + 1 }, { address: 'addr_test1buyer', outputIndex: nonce.index }] } as unknown)
-        : ({ hash: 'ok' } as unknown));
-
-    const r = await verifyPayment({
-      paymentHeader: envelope,
-      requirementsBody: requirementsBody(),
-      onAccepted,
-    });
-
-    expect(r.kind).toBe('accepted');
-    if (r.kind === 'accepted') {
-      expect(r.payment.network).toBe(NETWORK_PREPROD);
-      expect(r.payment.amountUnits).toBe('1000000');
-      expect(r.payment.payerAddr).toBe('addr_test1buyer');
-      expect(r.paymentResponseB64).toBeTruthy();
-      // base64 of {success:true, network, transaction:txHash}
-      const decoded = JSON.parse(Buffer.from(r.paymentResponseB64, 'base64').toString('utf8'));
-      expect(decoded).toMatchObject({ success: true, network: NETWORK_PREPROD });
-    }
-    expect(onAccepted).toHaveBeenCalledTimes(1);
+  it('bounds the TTL with now + maxTimeoutSeconds', async () => {
+    const { payload, req } = payment();
+    await runVerify(payload, req, ctx());
+    const [network, posixMs] = mocked.posixToSlot.mock.calls[0]!;
+    expect(network).toBe(NETWORK_PREPROD);
+    expect(Math.abs(posixMs - (Date.now() + 600_000))).toBeLessThan(5_000);
   });
 });
 
-describe('verifyPayment, payer address is best-effort', () => {
-  it('accepts without payerAddr when the nonce tx cannot be read', async () => {
-    const envelope = happyEnvelope();
-    const { decode } = await import('../../srv/core/decode');
-    const decoded = decode(envelope);
-    mockedBridge.submitTransaction.mockResolvedValue(decoded.txHash);
-    mockedBridge.getTransactionByHash.mockImplementation(async (hash: string) => {
-      if (hash === decoded.nonce.txHash) throw new Error('backend down');
-      return { hash: 'ok' } as unknown;
-    });
-    const r = await verifyPayment({ paymentHeader: envelope, requirementsBody: requirementsBody() });
-    expect(r.kind).toBe('accepted');
-    if (r.kind === 'accepted') expect(r.payment.payerAddr).toBeUndefined();
+describe('runVerify, requirements', () => {
+  it('rejects l1Confirmations -1 unless the facilitator opted in', async () => {
+    const req = requirements({ confirmationPolicy: { l1Confirmations: -1 } });
+    const { payload } = payment({ req });
+    expect((await runVerify(payload, req, ctx())).response.invalidReason).toBe(Codes.INVALID_POLICY);
+    expect((await runVerify(payload, req, ctx(true))).response.isValid).toBe(true);
   });
 
-  it('accepts without payerAddr when the output is not there', async () => {
-    const envelope = happyEnvelope();
-    const { decode } = await import('../../srv/core/decode');
-    const decoded = decode(envelope);
-    mockedBridge.submitTransaction.mockResolvedValue(decoded.txHash);
-    mockedBridge.getTransactionByHash.mockResolvedValue({ hash: 'ok', outputs: [] } as unknown);
-    const r = await verifyPayment({ paymentHeader: envelope, requirementsBody: requirementsBody() });
-    expect(r.kind).toBe('accepted');
-    if (r.kind === 'accepted') expect(r.payment.payerAddr).toBeUndefined();
-  });
-});
-
-describe('verifyPayment, rejection branches', () => {
-  it('MISSING_HEADER when paymentHeader is undefined', async () => {
-    const r = await verifyPayment({
-      paymentHeader: undefined,
-      requirementsBody: requirementsBody(),
-    });
-    expect(r.kind).toBe('rejected');
-    if (r.kind === 'rejected') expect(r.code).toBe(Codes.MISSING_HEADER);
-    expect(mockedBridge.getCurrentSlot).not.toHaveBeenCalled();
+  it('rejects an out-of-range policy', async () => {
+    const req = requirements();
+    const bad = { ...req, extra: { ...req.extra, confirmationPolicy: { l1Confirmations: 21 } } };
+    const { payload } = payment({ req: bad });
+    expect((await runVerify(payload, bad, ctx())).response.invalidReason).toBe(Codes.INVALID_POLICY);
   });
 
-  it('decode-level errors propagate with their codes', async () => {
-    const r = await verifyPayment({
-      paymentHeader: 'not-base64-!!!',
-      requirementsBody: requirementsBody(),
-    });
-    expect(r.kind).toBe('rejected');
-    if (r.kind === 'rejected') expect(r.code).toBe(Codes.INVALID_BASE64);
-  });
-
-  it('validate-level WRONG_RECIPIENT propagates', async () => {
-    // Build an envelope where the output goes to the buyer (not the seller).
-    const { BUYER_ADDR } = await import('../fixtures/constants');
-    const wrongRecipient = buildEnvelope({
-      txCborHex: signTx(buildBody({
-        inputs: [{ txHash: NONCE_TX_HASH, outputIndex: NONCE_INDEX }],
-        outputs: [{ address: BUYER_ADDR, lovelace: '1000000' }],
-        ttlSlot: FUTURE_SLOT,
-      }), [BUYER_PRIV]).cborHex,
-      nonceRef: NONCE_REF,
-    });
-
-    const r = await verifyPayment({
-      paymentHeader: wrongRecipient,
-      requirementsBody: requirementsBody(),
-    });
-    expect(r.kind).toBe('rejected');
-    if (r.kind === 'rejected') expect(r.code).toBe(Codes.WRONG_RECIPIENT);
-  });
-
-  it('REPLAY when bridge reports the nonce UTxO is spent', async () => {
-    mockedBridge.isUtxoUnspent.mockResolvedValue(false);
-    const r = await verifyPayment({
-      paymentHeader: happyEnvelope(),
-      requirementsBody: requirementsBody(),
-    });
-    expect(r.kind).toBe('rejected');
-    if (r.kind === 'rejected') expect(r.code).toBe(Codes.REPLAY);
-    // settle must not have been called
-    expect(mockedBridge.submitTransaction).not.toHaveBeenCalled();
-  });
-
-  it('BRIDGE_UNAVAILABLE when getCurrentSlot fails', async () => {
-    mockedBridge.getCurrentSlot.mockRejectedValue(new Error('bridge down'));
-    const r = await verifyPayment({
-      paymentHeader: happyEnvelope(),
-      requirementsBody: requirementsBody(),
-    });
-    expect(r.kind).toBe('rejected');
-    if (r.kind === 'rejected') {
-      expect(r.code).toBe(Codes.BRIDGE_UNAVAILABLE);
-      expect(r.reason).toMatch(/bridge down/);
-    }
-  });
-});
-
-describe('verifyPayment, pending', () => {
-  it('returns pending when settle times out', async () => {
-    const envelope = happyEnvelope();
-    const { decode } = await import('../../srv/core/decode');
-    const decoded = decode(envelope);
-
-    mockedBridge.submitTransaction.mockResolvedValue(decoded.txHash);
-    mockedBridge.getTransactionByHash.mockResolvedValue(null); // never visible
-
-    const r = await verifyPayment({
-      paymentHeader: envelope,
-      requirementsBody: requirementsBody(),
-      settlePollBudgetMs: 100,
-    });
-    expect(r.kind).toBe('pending');
-    if (r.kind === 'pending') {
-      expect(r.code).toBe(Codes.PENDING);
-      expect(r.txHash).toBe(decoded.txHash);
-    }
-  });
-});
-
-describe('verifyPayment, multi-accept', () => {
-  it('selects the native-asset entry when the buyer paid in USDM', async () => {
-    // Build a tx that pays USDM (with min-ADA) to the seller.
-    const body = buildBody({
-      inputs:  [{ txHash: NONCE_TX_HASH, outputIndex: NONCE_INDEX }],
-      outputs: [{
-        address:  SELLER_ADDR,
-        lovelace: '1500000', // min-ADA for an asset-bearing output
-        assets:   [{ policyId: USDM_PREPROD_POLICY, nameHex: USDM_NAME_HEX, qty: '100000' }],
-      }],
-      ttlSlot: FUTURE_SLOT,
-    });
-    const signed = signTx(body, [BUYER_PRIV]);
-    const envelope = buildEnvelope({ txCborHex: signed.cborHex, nonceRef: NONCE_REF });
-
-    // Server advertises BOTH ADA and USDM as accepted options.
-    const reqs = buildPaymentRequirementsMulti({
-      payTo:    SELLER_ADDR,
-      network:  NETWORK_PREPROD,
-      resource: '/r',
-      options: [
-        { amount: '500000', asset: 'lovelace' },         // also offered
-        { amount: '100000', asset: USDM_PREPROD_ASSET }, // ← what got paid
-      ],
-    });
-
-    const { decode } = await import('../../srv/core/decode');
-    const decoded = decode(envelope);
-    mockedBridge.submitTransaction.mockResolvedValue(decoded.txHash);
-    mockedBridge.getTransactionByHash.mockResolvedValue({ hash: 'ok' } as unknown);
-
-    const r = await verifyPayment({ paymentHeader: envelope, requirementsBody: reqs });
-    expect(r.kind).toBe('accepted');
-    if (r.kind === 'accepted') {
-      expect(r.payment.asset).toBe(USDM_PREPROD_ASSET);
-      expect(r.payment.amountUnits).toBe('100000');
+  it('rejects an unsupported scheme, network or transfer method', async () => {
+    const req = requirements();
+    const { payload } = payment();
+    const cases: Array<[PaymentRequirements, string]> = [
+      [{ ...req, scheme: 'upto' } as unknown as PaymentRequirements, Codes.UNSUPPORTED_SCHEME],
+      [{ ...req, network: 'eip155:8453' } as unknown as PaymentRequirements, Codes.INVALID_NETWORK_FORMAT],
+      [{ ...req, extra: { assetTransferMethod: 'masumi' } } as unknown as PaymentRequirements, Codes.UNSUPPORTED_METHOD],
+    ];
+    for (const [r, code] of cases) {
+      expect((await runVerify(payload, r, ctx())).response.invalidReason).toBe(code);
     }
   });
 
-  it('rejects with wrong_asset when no multi-accept entry matches the paid asset', async () => {
-    // Buyer pays plain ADA; server demands a native token.
-    const envelope = happyEnvelope({ amount: '1000000' });
-    const reqs = buildPaymentRequirementsMulti({
-      payTo:    SELLER_ADDR,
-      network:  NETWORK_PREPROD,
-      resource: '/r',
-      options: [
-        { amount: '1', asset: USDM_PREPROD_ASSET },
-      ],
-    });
-    const r = await verifyPayment({ paymentHeader: envelope, requirementsBody: reqs });
-    expect(r.kind).toBe('rejected');
-    if (r.kind === 'rejected') expect(r.code).toBe(Codes.WRONG_ASSET);
+  it('rejects when accepted differs from the requirements', async () => {
+    const { payload } = payment();
+    const other = buildRequirements({ amount: 3_000_000n, asset: 'lovelace', payTo: SELLER_ADDR, network: NETWORK_PREPROD });
+    expect((await runVerify(payload, other, ctx())).response.invalidReason).toBe(Codes.ACCEPTED_MISMATCH);
+  });
+
+  it('treats a CIP-34 alias in accepted as the canonical network', async () => {
+    const { payload, req } = payment();
+    const aliased = { ...payload, accepted: { ...payload.accepted, network: 'cip34:0-1' } } as unknown as PaymentPayload;
+    expect((await runVerify(aliased, req, ctx())).response.isValid).toBe(true);
   });
 });
 
-describe('verifyPayment, pickRequirement failure', () => {
-  it('rejects with NETWORK_MISMATCH when envelope network is not in any accepts entry', async () => {
-    const envelope = happyEnvelope();
-    // Server demands mainnet, envelope says preprod.
-    const reqs = buildPaymentRequirements({
-      amount: '1000000',
-      asset: 'lovelace',
-      payTo: SELLER_ADDR,
-      network: 'cardano:mainnet',
-      resource: '/r',
-    });
-    const r = await verifyPayment({ paymentHeader: envelope, requirementsBody: reqs });
-    expect(r.kind).toBe('rejected');
-    if (r.kind === 'rejected') expect(r.code).toBe(Codes.NETWORK_MISMATCH);
+describe('runVerify, backend network', () => {
+  it.each([undefined, null])('does not check the network when the backend reports %s', async (reported) => {
+    mocked.getBackendNetwork.mockResolvedValue(reported as unknown as string | null);
+    const { payload, req } = payment();
+    expect((await runVerify(payload, req, ctx())).response.isValid).toBe(true);
+  });
+
+  it('verifies a payment on the network the backend serves', async () => {
+    mocked.getBackendNetwork.mockResolvedValue(NETWORK_PREPROD);
+    const { payload, req } = payment();
+    expect((await runVerify(payload, req, ctx())).response.isValid).toBe(true);
+  });
+
+  it('rejects requirements for a network the backend does not serve, before any chain lookup', async () => {
+    mocked.getBackendNetwork.mockResolvedValue('cardano:preview');
+    const { payload, req } = payment();
+    const r = await runVerify(payload, req, ctx());
+    expect(r.response).toMatchObject({ isValid: false, invalidReason: Codes.INVALID_NETWORK_FORMAT });
+    expect(r.response.extra?.reason).toMatch(/cardano:preview.*cardano:preprod/);
+    expect(mocked.getTransactionByHash).not.toHaveBeenCalled();
+    expect(mocked.isUtxoUnspent).not.toHaveBeenCalled();
+  });
+
+  it('compares the canonical id, so a CIP-34 alias of the served network passes', async () => {
+    mocked.getBackendNetwork.mockResolvedValue(NETWORK_PREPROD);
+    const { payload, req } = payment();
+    const aliased = { ...req, network: 'cip34:0-1' as typeof req.network };
+    expect((await runVerify(payload, aliased, ctx())).response.isValid).toBe(true);
+  });
+
+  it('turns a failing backend lookup into unexpected_verify_error', async () => {
+    mocked.getBackendNetwork.mockRejectedValue(new Error('core not initialized'));
+    const { payload, req } = payment();
+    expect((await runVerify(payload, req, ctx())).response.invalidReason).toBe(Codes.UNEXPECTED_VERIFY_ERROR);
   });
 });
 
-describe('verifyPayment, settle failure', () => {
-  it('returns rejected/SUBMIT_FAILED when submitTransaction throws with a non-already-known error', async () => {
-    mockedBridge.submitTransaction.mockRejectedValue(new Error('node refused tx: BadTx'));
-    const r = await verifyPayment({
-      paymentHeader: happyEnvelope(),
-      requirementsBody: requirementsBody(),
-    });
-    expect(r.kind).toBe('rejected');
-    if (r.kind === 'rejected') {
-      expect(r.code).toBe(Codes.SUBMIT_FAILED);
-      expect(r.reason).toMatch(/node refused/);
-    }
+describe('runVerify, payload', () => {
+  it('rejects a transaction that does not decode', async () => {
+    const { payload, req } = payment();
+    const broken: PaymentPayload = { ...payload, payload: { ...payload.payload, transaction: 'AAAA' } };
+    expect((await runVerify(broken, req, ctx())).response.invalidReason).toBe(Codes.INVALID_CBOR);
+  });
+
+  it('runs the structural rules', async () => {
+    const { payload, req } = payment({ outputs: [{ address: BUYER_ADDR, lovelace: (FUNDING - FEE).toString() }] });
+    expect((await runVerify(payload, req, ctx())).response.invalidReason).toBe(Codes.WRONG_RECIPIENT);
+  });
+
+  it('rejects a TTL beyond now + maxTimeoutSeconds', async () => {
+    const { payload, req } = payment({ ttlSlot: MAX_TTL_SLOT + 1 });
+    expect((await runVerify(payload, req, ctx())).response.invalidReason).toBe(Codes.TTL_TOO_FAR);
   });
 });
 
-describe('verifyPayment, onAccepted is best-effort', () => {
-  it('still returns accepted when onAccepted throws', async () => {
-    const envelope = happyEnvelope();
-    const { decode } = await import('../../srv/core/decode');
-    const decoded = decode(envelope);
+describe('runVerify, settlement claims', () => {
+  it('rejects a transaction this facilitator already settled', async () => {
+    const { payload, req, txHash } = payment();
+    const c = ctx();
+    await c.store.claim(txHash, Date.now() + 60_000, Date.now() + 60_000);
+    await c.store.update(txHash, { state: 'settled' });
+    expect((await runVerify(payload, req, c)).response.invalidReason).toBe(Codes.DUPLICATE_SETTLEMENT);
+  });
 
-    mockedBridge.submitTransaction.mockResolvedValue(decoded.txHash);
-    mockedBridge.getTransactionByHash.mockResolvedValue({ hash: 'ok' } as unknown);
+  it('accepts an in-flight claim whose tx the ledger accepted, despite spent inputs and passed TTL', async () => {
+    const { payload, req, txHash } = payment();
+    const c = ctx();
+    await c.store.claim(txHash, Date.now() + 60_000, Date.now() + 60_000);
+    await c.store.update(txHash, { state: 'pending' });
+    mocked.getTransactionByHash.mockImplementation(async (hash: string) =>
+      hash === NONCE_TX_HASH ? fundingTx() : hash === txHash ? { hash, blockHeight: 100, blockTime: 1, outputs: [] } : null);
+    mocked.isUtxoUnspent.mockResolvedValue(false);
+    mocked.getCurrentSlot.mockResolvedValue(TTL_SLOT + 10);
+    expect((await runVerify(payload, req, c)).response.isValid).toBe(true);
+  });
 
-    const onAccepted = jest.fn().mockRejectedValue(new Error('audit DB down'));
-    const r = await verifyPayment({
-      paymentHeader: envelope,
-      requirementsBody: requirementsBody(),
-      onAccepted,
-    });
-    expect(r.kind).toBe('accepted');
-    expect(onAccepted).toHaveBeenCalledTimes(1);
+  it('skips the unspent check for an in-flight claim even before an indexer shows the tx', async () => {
+    const { payload, req, txHash } = payment();
+    const c = ctx();
+    await c.store.claim(txHash, Date.now() + 60_000, Date.now() + 60_000);
+    mocked.isUtxoUnspent.mockResolvedValue(false);
+    expect((await runVerify(payload, req, c)).response.isValid).toBe(true);
+  });
+
+  it('answers a payload without a payload field as invalid_payload', async () => {
+    const { req } = payment();
+    const broken = { x402Version: 2, accepted: req } as unknown as Parameters<typeof runVerify>[0];
+    expect((await runVerify(broken, req, ctx())).response).toMatchObject({ isValid: false, invalidReason: Codes.INVALID_PAYLOAD });
+  });
+
+  it('verifies requirements that name the network by its CIP-34 alias', async () => {
+    const { payload, req } = payment();
+    const aliased = { ...req, network: 'cip34:0-1' as typeof req.network };
+    expect((await runVerify(payload, aliased, ctx())).response.isValid).toBe(true);
   });
 });
 
-describe('verifyPayment, pending-retry fallback (spent nonce, own tx on chain)', () => {
-  function spentNonce(blockTimeSecsAgo: number | null) {
-    mockedBridge.isUtxoUnspent.mockResolvedValue(false);
-    mockedBridge.getTransactionByHash.mockResolvedValue(
-      blockTimeSecsAgo == null
-        ? ({ hash: 'x' } as unknown)
-        : ({ hash: 'x', blockTime: Math.floor(Date.now() / 1000) - blockTimeSecsAgo } as unknown),
-    );
-  }
-
-  it('accepts when the payment tx settled within the grace window', async () => {
-    const onAccepted = jest.fn();
-    const envelope = happyEnvelope();
-    spentNonce(30); // settled 30s ago, inside the default 5 min window
-
-    const r = await verifyPayment({
-      paymentHeader: envelope,
-      requirementsBody: requirementsBody(),
-      onAccepted,
-    });
-
-    expect(r.kind).toBe('accepted');
-    if (r.kind === 'accepted') {
-      const { decode } = await import('../../srv/core/decode');
-      expect(r.txHash).toBe(decode(envelope).txHash);
-      expect(r.paymentResponseB64).toBeTruthy();
-    }
-    expect(onAccepted).toHaveBeenCalledTimes(1);
-    // The tx is already on chain; the fallback must not re-submit.
-    expect(mockedBridge.submitTransaction).not.toHaveBeenCalled();
+describe('runVerify, chain rules', () => {
+  it('rejects a spent nonce', async () => {
+    const { payload, req } = payment();
+    mocked.isUtxoUnspent.mockResolvedValue(false);
+    expect((await runVerify(payload, req, ctx())).response.invalidReason).toBe(Codes.REPLAY);
   });
 
-  it('rejects REPLAY when the tx settled outside the grace window', async () => {
-    spentNonce(400); // 400s ago > default 300s window
-    const r = await verifyPayment({
-      paymentHeader: happyEnvelope(),
-      requirementsBody: requirementsBody(),
-    });
-    expect(r.kind).toBe('rejected');
-    if (r.kind === 'rejected') expect(r.code).toBe(Codes.REPLAY);
+  it('rejects a value imbalance', async () => {
+    const { payload, req } = payment();
+    mocked.getTransactionByHash.mockImplementation(async (hash: string) =>
+      hash === NONCE_TX_HASH ? fundingTx([{ unit: 'lovelace', quantity: (FUNDING + 1n).toString() }]) : null);
+    expect((await runVerify(payload, req, ctx())).response.invalidReason).toBe(Codes.VALUE_NOT_CONSERVED);
   });
 
-  it('rejects REPLAY when the envelope tx is not on chain (true replay of a foreign spend)', async () => {
-    mockedBridge.isUtxoUnspent.mockResolvedValue(false);
-    mockedBridge.getTransactionByHash.mockResolvedValue(null);
-    const r = await verifyPayment({
-      paymentHeader: happyEnvelope(),
-      requirementsBody: requirementsBody(),
-    });
-    expect(r.kind).toBe('rejected');
-    if (r.kind === 'rejected') expect(r.code).toBe(Codes.REPLAY);
-  });
-
-  it('rejects REPLAY when the backend reports no blockTime (no server-side anchor)', async () => {
-    spentNonce(null);
-    const r = await verifyPayment({
-      paymentHeader: happyEnvelope(),
-      requirementsBody: requirementsBody(),
-    });
-    expect(r.kind).toBe('rejected');
-    if (r.kind === 'rejected') expect(r.code).toBe(Codes.REPLAY);
-  });
-
-  it('pendingGraceMs: 0 disables the fallback entirely', async () => {
-    spentNonce(1);
-    const r = await verifyPayment({
-      paymentHeader: happyEnvelope(),
-      requirementsBody: requirementsBody(),
-      pendingGraceMs: 0,
-    });
-    expect(r.kind).toBe('rejected');
-    if (r.kind === 'rejected') expect(r.code).toBe(Codes.REPLAY);
-    // Disabled means no chain lookup for the fallback either.
-    expect(mockedBridge.getTransactionByHash).not.toHaveBeenCalled();
-  });
-});
-
-describe('checkTransfer', () => {
-  it('hands the decoded tx and the paid entry to the hook', async () => {
-    const verifyTransfer = jest.fn().mockResolvedValue({ ok: true });
-    const r = await checkTransfer({ paymentHeader: happyEnvelope(), requirementsBody: requirementsBody(), verifyTransfer });
-    expect(r).toBeNull();
-    const ctx = verifyTransfer.mock.calls[0]![0];
-    expect(ctx.requirement.payTo).toBe(SELLER_ADDR);
-    expect(ctx.decoded.outputs[0].address).toBe(SELLER_ADDR);
-    expect(mockedBridge.submitTransaction).not.toHaveBeenCalled();
-    expect(mockedBridge.isUtxoUnspent).not.toHaveBeenCalled();
-  });
-
-  it('turns a hook rejection into transfer_rejected', async () => {
-    const r = await checkTransfer({
-      paymentHeader: happyEnvelope(),
-      requirementsBody: requirementsBody(),
-      verifyTransfer: () => ({ ok: false, reason: 'datum does not name this order' }),
-    });
-    expect(r).toMatchObject({ kind: 'rejected', code: Codes.TRANSFER_REJECTED, reason: 'datum does not name this order' });
-  });
-
-  it('rejects a missing header without calling the hook', async () => {
-    const verifyTransfer = jest.fn();
-    const r = await checkTransfer({ paymentHeader: undefined, requirementsBody: requirementsBody(), verifyTransfer });
-    expect(r).toMatchObject({ kind: 'rejected', code: Codes.MISSING_HEADER });
-    expect(verifyTransfer).not.toHaveBeenCalled();
-  });
-
-  it('rejects a payment no accepts[] entry matches without calling the hook', async () => {
-    const verifyTransfer = jest.fn();
-    const body = buildPaymentRequirementsMulti({
-      options: [{ amount: '1000000' }, { amount: '5', asset: USDM_PREPROD_ASSET }],
-      payTo: SELLER_ADDR, network: NETWORK_PREPROD, asset: 'lovelace', resource: '/r',
-    });
-    const r = await checkTransfer({ paymentHeader: happyEnvelope({ outputAddr: BUYER_ADDR }), requirementsBody: body, verifyTransfer });
-    expect(r).toMatchObject({ kind: 'rejected', code: Codes.WRONG_ASSET });
-    expect(verifyTransfer).not.toHaveBeenCalled();
+  it('turns a backend failure into unexpected_verify_error', async () => {
+    const { payload, req } = payment();
+    mocked.getCurrentSlot.mockRejectedValue(new Error('backend down'));
+    const r = await runVerify(payload, req, ctx());
+    expect(r.response.invalidReason).toBe(Codes.UNEXPECTED_VERIFY_ERROR);
+    expect(r.response.extra?.reason).toMatch(/backend down/);
   });
 });

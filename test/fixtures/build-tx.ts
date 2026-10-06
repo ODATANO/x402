@@ -96,12 +96,13 @@ export interface SignedTx {
   txHash: string;
 }
 
-function txToHex(body: TxBody, vkeyWitnesses: VKeyWitness[]): string {
-  const tx = new Tx({ body, witnesses: new TxWitnessSet({ vkeyWitnesses }) });
+function txToHex(body: TxBody, vkeyWitnesses: VKeyWitness[], isScriptValid = true): string {
+  const tx = new Tx({ body, witnesses: new TxWitnessSet({ vkeyWitnesses }), isScriptValid });
   return Buffer.from(tx.toCborBytes()).toString('hex');
 }
 
-export function signTx(body: TxBody, signers: Uint8Array[]): SignedTx {
+/** `isScriptValid: false` builds a tx that declares a failing script. */
+export function signTx(body: TxBody, signers: Uint8Array[], isScriptValid = true): SignedTx {
   const hashBytes = body.hash.toBuffer();
   const vkeyWitnesses = signers.map(key => {
     const { pubKey, signature } = signEd25519_sync(hashBytes, key);
@@ -111,7 +112,7 @@ export function signTx(body: TxBody, signers: Uint8Array[]): SignedTx {
     });
   });
   return {
-    cborHex: txToHex(body, vkeyWitnesses),
+    cborHex: txToHex(body, vkeyWitnesses, isScriptValid),
     txHash:  body.hash.toString().toLowerCase(),
   };
 }

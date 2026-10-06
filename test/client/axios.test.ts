@@ -1,68 +1,61 @@
 /**
- * `x402Axios` is tested against a hand-rolled minimal axios shim, we
- * don't pull in real axios as a dev dependency just for one test file.
- * The shim faithfully reproduces the interceptor + request contract,
- * which is all `x402Axios` touches.
+ * `x402Axios` against a minimal axios-shaped shim: it reproduces the
+ * interceptor and request contract, which is all `x402Axios` touches.
  */
-
-// decode() pulls in srv/bridge → @odatano/core; stub the barrel to its
-// pure parser (see core-parse-mock) so its uncompiled .ts isn't loaded.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-jest.mock('@odatano/core', () => require('../fixtures/core-parse-mock').coreParseMock());
 
 import { x402Axios } from '../../srv/client/axios';
 import { X402PaymentError } from '../../srv/client/errors';
-import { decode } from '../../srv/core/decode';
-import { buildBody, signTx } from '../fixtures/build-tx';
-import {
-  BUYER_PRIV, SELLER_ADDR, NONCE_TX_HASH, NONCE_REF, NETWORK_PREPROD,
-} from '../fixtures/constants';
+import { Codes } from '../../srv/core/errors';
+import { decodeHeader, encodeRawPayload } from '../fixtures/envelope';
+import { NETWORK_PREPROD, NONCE_REF, SELLER_ADDR } from '../fixtures/constants';
 import type {
-  PaymentRequirementsBody,
+  PaymentPayload,
+  PaymentRequired,
+  PaymentRequirements,
+  SettlementResponse,
 } from '../../srv/core/types';
 
-const signed = (() => {
-  const body = buildBody({
-    inputs:  [{ txHash: NONCE_TX_HASH, outputIndex: 0 }],
-    outputs: [{ address: SELLER_ADDR, lovelace: '1000000' }],
-    ttlSlot: 80_000_500,
-  });
-  return signTx(body, [BUYER_PRIV]);
-})();
-
-const REQS: PaymentRequirementsBody = {
-  x402Version: 2,
-  accepts: [{
-    scheme:              'exact',
-    network:             NETWORK_PREPROD,
-    asset:               'lovelace',
-    amount:              '1000000',
-    payTo:               SELLER_ADDR,
-    resource:            { url: 'https://api.example/foo', description: 'X', mimeType: 'application/json' },
-    maxTimeoutSeconds:   600,
-  }],
+const ACCEPTED: PaymentRequirements = {
+  scheme: 'exact',
+  network: NETWORK_PREPROD,
+  asset: 'lovelace',
+  amount: '1000000',
+  payTo: SELLER_ADDR,
+  maxTimeoutSeconds: 600,
 };
 
-/**
- * Minimal axios-shaped client. `responses` is a FIFO queue: each
- * `request()` consumes one entry, if it has `error`, the
- * onRejected interceptor fires; otherwise onFulfilled.
- */
-function makeShim(responses: Array<{ status: number; data?: unknown }>) {
+const REQUIRED: PaymentRequired = {
+  x402Version: 2,
+  error: 'PAYMENT-SIGNATURE header is required',
+  resource: { url: '/foo' },
+  accepts: [ACCEPTED],
+};
+
+const PAID = { signedTxCborHex: 'cafe', nonceRef: NONCE_REF };
+const pending: SettlementResponse = {
+  success: false, errorReason: Codes.PENDING, transaction: 'ab'.repeat(32), network: NETWORK_PREPROD,
+};
+
+interface Queued { status: number; headers?: unknown; data?: unknown }
+
+/** Headers as axios exposes them: a plain object with lower-cased names. */
+function lower(required: PaymentRequired | null = REQUIRED, settlement?: SettlementResponse): Record<string, string> {
+  return {
+    ...(required ? { 'payment-required': encodeRawPayload(required) } : {}),
+    ...(settlement ? { 'payment-response': encodeRawPayload(settlement) } : {}),
+  };
+}
+
+function makeShim(responses: Queued[]) {
   type Handler = (x: unknown) => unknown;
   let onFulfilled: Handler = (r) => r;
-  let onRejected:  Handler = (e) => { throw e; };
-
+  let onRejected: Handler = (e) => { throw e; };
   const calls: Array<Record<string, unknown>> = [];
 
   const instance = {
     interceptors: {
       response: {
-        use(f: Handler, r: Handler) {
-          onFulfilled = f;
-          onRejected  = r;
-          return 0;
-        },
+        use(f: Handler, r: Handler) { onFulfilled = f; onRejected = r; return 0; },
       },
     },
     async request(cfg: Record<string, unknown>) {
@@ -71,7 +64,7 @@ function makeShim(responses: Array<{ status: number; data?: unknown }>) {
       if (!next) throw new Error('shim: ran out of queued responses');
       if (next.status >= 400) {
         const err = Object.assign(new Error(`HTTP ${next.status}`), {
-          response: { status: next.status, data: next.data },
+          response: { status: next.status, headers: next.headers, data: next.data },
           config:   cfg,
         });
         return onRejected(err);
@@ -79,223 +72,127 @@ function makeShim(responses: Array<{ status: number; data?: unknown }>) {
       return onFulfilled({ status: next.status, data: next.data, config: cfg });
     },
   };
-
   return { instance, calls };
 }
 
+function signatureOf(cfg: Record<string, unknown> | undefined): string {
+  return String((cfg?.headers as Record<string, unknown> | undefined)?.['PAYMENT-SIGNATURE']);
+}
+
+/** The rejection of a call expected to fail with `X402PaymentError`. */
+async function rejection(p: Promise<unknown>): Promise<X402PaymentError> {
+  try {
+    await p;
+  } catch (e) {
+    if (e instanceof X402PaymentError) return e;
+    throw e;
+  }
+  throw new Error('expected an X402PaymentError');
+}
+
 describe('x402Axios', () => {
-  it('passes non-402 responses through unchanged', async () => {
-    const { instance, calls } = makeShim([{ status: 200, data: 'ok' }]);
-    const client = x402Axios(instance, { pay: jest.fn() });
-    const res = await client.request({ url: '/foo' }) as { status: number };
-    expect(res.status).toBe(200);
-    expect(calls).toHaveLength(1);
-  });
-
-  it('on 402: pays, retries with PAYMENT-SIGNATURE, returns the second response', async () => {
-    const { instance, calls } = makeShim([
-      { status: 402, data: REQS },
-      { status: 200, data: 'paid' },
-    ]);
-    const pay = jest.fn(async () => ({
-      signedTxCborHex: signed.cborHex,
-      nonceRef:        NONCE_REF,
-    }));
-    const client = x402Axios(instance, { pay });
-
-    const res = await client.request({ url: '/foo', headers: { 'X-Trace': 't1' } }) as { status: number; data: string };
-    expect(res.status).toBe(200);
-    expect(res.data).toBe('paid');
-    expect(pay).toHaveBeenCalledTimes(1);
-    expect(calls).toHaveLength(2);
-
-    // Second call merged headers: PAYMENT-SIGNATURE added, X-Trace preserved.
-    const secondHeaders = (calls[1]!.headers ?? {}) as Record<string, string>;
-    expect(secondHeaders['X-Trace']).toBe('t1');
-    const header = secondHeaders['PAYMENT-SIGNATURE'];
-    expect(header).toBeTruthy();
-
-    // And the header round-trips through decode().
-    const decoded = decode(header);
-    expect(decoded.txHash).toBe(signed.txHash);
-    expect(decoded.envelope.payload.nonce).toBe(NONCE_REF);
-  });
-
-  it('rejects (propagates the 402 error) when no v2 accepts present', async () => {
-    const { instance } = makeShim([{ status: 402, data: { x402Version: 1 } }]);
+  it('passes non-402 responses through', async () => {
+    const { instance } = makeShim([{ status: 200, data: 'ok' }]);
     const pay = jest.fn();
-    const client = x402Axios(instance, { pay });
-    await expect(client.request({ url: '/foo' })).rejects.toMatchObject({ response: { status: 402 } });
+    const res = await x402Axios(instance, { pay }).request({ url: '/foo' }) as { status: number };
+    expect(res.status).toBe(200);
     expect(pay).not.toHaveBeenCalled();
   });
 
-  it('does not loop past maxRetries (second 402 propagates)', async () => {
-    const { instance, calls } = makeShim([
-      { status: 402, data: REQS },
-      { status: 402, data: REQS },
-    ]);
-    const pay = jest.fn(async () => ({
-      signedTxCborHex: signed.cborHex,
-      nonceRef:        NONCE_REF,
-    }));
-    const client = x402Axios(instance, { pay, maxRetries: 1 });
+  it('rethrows non-402 errors', async () => {
+    const { instance } = makeShim([{ status: 500 }]);
+    await expect(x402Axios(instance, { pay: jest.fn() }).request({ url: '/foo' })).rejects.toThrow('HTTP 500');
+  });
 
-    await expect(client.request({ url: '/foo' })).rejects.toMatchObject({ response: { status: 402 } });
+  it('pays from the lower-cased payment-required header and retries', async () => {
+    const { instance, calls } = makeShim([{ status: 402, headers: lower() }, { status: 200, data: 'ok' }]);
+    const pay = jest.fn(async () => PAID);
+    const res = await x402Axios(instance, { pay }).request({ url: '/foo', headers: { 'x-a': '1' } }) as { status: number };
+
+    expect(res.status).toBe(200);
+    expect(pay).toHaveBeenCalledWith(ACCEPTED, REQUIRED);
+    const payload = decodeHeader<PaymentPayload>(signatureOf(calls[1]));
+    expect(payload.accepted).toEqual(ACCEPTED);
+    expect(payload.resource).toEqual(REQUIRED.resource);
+    expect((calls[1]!.headers as Record<string, unknown>)['x-a']).toBe('1');
+  });
+
+  it('reads headers through AxiosHeaders.get', async () => {
+    const values = lower();
+    const headers = { get: (name: string) => values[name.toLowerCase()] };
+    const { instance } = makeShim([{ status: 402, headers }, { status: 200 }]);
+    const pay = jest.fn(async () => PAID);
+    await x402Axios(instance, { pay }).request({ url: '/foo' });
     expect(pay).toHaveBeenCalledTimes(1);
-    expect(calls).toHaveLength(2);
   });
 
-  it('wraps pay-handler errors in X402PaymentError(pay_handler_failed)', async () => {
-    const { instance } = makeShim([{ status: 402, data: REQS }]);
-    const walletError = new Error('wallet cancelled');
-    const pay = jest.fn(async () => { throw walletError; });
-    const client = x402Axios(instance, { pay });
-
-    try {
-      await client.request({ url: '/foo' });
-      throw new Error('should not reach here');
-    } catch (err) {
-      expect(err).toBeInstanceOf(X402PaymentError);
-      const e = err as X402PaymentError;
-      expect(e.kind).toBe('pay_handler_failed');
-      expect(e.cause).toBe(walletError);
-    }
+  it('treats a body-only 402 as invalid_payment_required', async () => {
+    const { instance } = makeShim([{ status: 402, headers: {}, data: REQUIRED }]);
+    const pay = jest.fn();
+    await expect(x402Axios(instance, { pay, errorOnFailure: true }).request({ url: '/foo' }))
+      .rejects.toMatchObject({ kind: 'invalid_payment_required' });
+    expect(pay).not.toHaveBeenCalled();
   });
 
-  it('errorOnFailure: wraps retries-exhausted in X402PaymentError', async () => {
-    const errorBody = { ...REQS, error: 'payment required (insufficient_amount): paid 1 < required 1000' };
-    const { instance } = makeShim([
-      { status: 402, data: errorBody },
-      { status: 402, data: errorBody },
-    ]);
-    const pay = jest.fn(async () => ({
-      signedTxCborHex: signed.cborHex, nonceRef: NONCE_REF,
-    }));
-    const client = x402Axios(instance, { pay, maxRetries: 1, errorOnFailure: true });
-
-    try {
-      await client.request({ url: '/foo' });
-      throw new Error('should not reach here');
-    } catch (err) {
-      expect(err).toBeInstanceOf(X402PaymentError);
-      const e = err as X402PaymentError;
-      expect(e.kind).toBe('retries_exhausted');
-      expect(e.code).toBe('insufficient_amount');
-      expect(e.httpStatus).toBe(402);
-    }
+  it('rethrows the axios error for a body-only 402 without errorOnFailure', async () => {
+    const { instance } = makeShim([{ status: 402, headers: {}, data: REQUIRED }]);
+    await expect(x402Axios(instance, { pay: jest.fn() }).request({ url: '/foo' })).rejects.toThrow('HTTP 402');
   });
 
-  it('default behaviour without errorOnFailure: still re-throws the original AxiosError', async () => {
-    const { instance } = makeShim([
-      { status: 402, data: REQS },
-      { status: 402, data: REQS },
-    ]);
-    const pay = jest.fn(async () => ({
-      signedTxCborHex: signed.cborHex, nonceRef: NONCE_REF,
-    }));
-    const client = x402Axios(instance, { pay, maxRetries: 1 });
-    await expect(client.request({ url: '/foo' })).rejects.toMatchObject({ response: { status: 402 } });
-  });
-
-  it('throws if opts.pay is missing', () => {
-    const { instance } = makeShim([]);
-    expect(() => x402Axios(instance, { pay: undefined as never })).toThrow(/pay must be a function/);
-  });
-
-  it('rethrows non-402 errors untouched', async () => {
-    const { instance } = makeShim([{ status: 500, data: { msg: 'oops' } }]);
-    const client = x402Axios(instance, { pay: jest.fn() });
-    await expect(client.request({ url: '/foo' })).rejects.toMatchObject({ response: { status: 500 } });
-  });
-
-  it('errorOnFailure: wraps invalid_402_body when JSON parses but is not v2', async () => {
-    const { instance } = makeShim([{ status: 402, data: { x402Version: 1 } }]);
-    const client = x402Axios(instance, { pay: jest.fn(), errorOnFailure: true });
-    await expect(client.request({ url: '/foo' })).rejects.toMatchObject({
-      kind: 'invalid_402_body',
-    });
-  });
-
-  it('errorOnFailure: wraps server_rejected when selectAccepts returns undefined', async () => {
-    const { instance } = makeShim([{ status: 402, data: REQS }]);
-    const client = x402Axios(instance, {
-      pay: jest.fn(),
-      errorOnFailure: true,
-      selectAccepts: () => undefined,
-    });
-    await expect(client.request({ url: '/foo' })).rejects.toBeInstanceOf(X402PaymentError);
-  });
-
-  it('without errorOnFailure: select-returns-undefined rethrows the original 402', async () => {
-    const { instance } = makeShim([{ status: 402, data: REQS }]);
-    const client = x402Axios(instance, {
-      pay: jest.fn(),
-      selectAccepts: () => undefined,
-    });
-    await expect(client.request({ url: '/foo' })).rejects.toMatchObject({ response: { status: 402 } });
-  });
-
-  it('errorOnFailure: retries_exhausted falls back to invalid_402_body when last body is not v2', async () => {
-    // Both responses lack a v2 shape, the very first attempt is rejected
-    // via "invalid_402_body" instead of looping. This exercises maybeWrap's
-    // fallback constructor (line 79).
-    const { instance } = makeShim([{ status: 402, data: 'plain string' }]);
-    const client = x402Axios(instance, { pay: jest.fn(), errorOnFailure: true });
-    await expect(client.request({ url: '/foo' })).rejects.toMatchObject({
-      kind: 'invalid_402_body',
-    });
-  });
-});
-
-// ─── Settlement-pending re-sends (402 + pending: true) ─────────────────
-
-describe('x402Axios settlement pending', () => {
-  const pendingData = { ...REQS, pending: true, transaction: 'aa'.repeat(32) };
-
-  it('re-sends the same envelope on pending 402 without paying again', async () => {
+  it('re-sends the same header on settlement_pending without paying again', async () => {
     const { instance, calls } = makeShim([
-      { status: 402, data: REQS },
-      { status: 402, data: pendingData },
-      { status: 402, data: pendingData },
-      { status: 200, data: 'paid' },
+      { status: 402, headers: lower() },
+      { status: 402, headers: lower(REQUIRED, pending) },
+      { status: 200 },
     ]);
-    const pay = jest.fn(async () => ({
-      signedTxCborHex: signed.cborHex,
-      nonceRef:        NONCE_REF,
-    }));
-    const client = x402Axios(instance, { pay, pendingRetryDelayMs: 1 });
+    const pay = jest.fn(async () => PAID);
+    const res = await x402Axios(instance, { pay, pendingRetryDelayMs: 0 }).request({ url: '/foo' }) as { status: number };
 
-    const res = await client.request({ headers: {} }) as { status: number };
     expect(res.status).toBe(200);
     expect(pay).toHaveBeenCalledTimes(1);
-    expect(calls).toHaveLength(4);
-
-    // Calls 2..4 must carry one identical PAYMENT-SIGNATURE header.
-    const sigs = calls.slice(1).map(
-      c => (c.headers as Record<string, unknown>)['PAYMENT-SIGNATURE'],
-    );
-    expect(sigs[0]).toBeTruthy();
-    expect(new Set(sigs).size).toBe(1);
+    expect(signatureOf(calls[2])).toBe(signatureOf(calls[1]));
   });
 
-  it('throws settlement_pending once pendingRetries are exhausted (errorOnFailure)', async () => {
-    const { instance, calls } = makeShim([
-      { status: 402, data: REQS },
-      { status: 402, data: pendingData },
-      { status: 402, data: pendingData },
+  it('throws settlement_pending once pendingRetries are used up', async () => {
+    const { instance } = makeShim([
+      { status: 402, headers: lower() },
+      { status: 402, headers: lower(REQUIRED, pending) },
+      { status: 402, headers: lower(REQUIRED, pending) },
     ]);
-    const pay = jest.fn(async () => ({
-      signedTxCborHex: signed.cborHex,
-      nonceRef:        NONCE_REF,
-    }));
-    const client = x402Axios(instance, {
-      pay, errorOnFailure: true,
-      pendingRetries: 1, pendingRetryDelayMs: 1,
-    });
+    const err = await rejection(x402Axios(instance, {
+      pay: async () => PAID, pendingRetries: 1, pendingRetryDelayMs: 0, errorOnFailure: true,
+    }).request({ url: '/foo' }));
 
-    await expect(client.request({ headers: {} }))
-      .rejects.toMatchObject({ kind: 'settlement_pending' });
-    expect(pay).toHaveBeenCalledTimes(1);
-    expect(calls).toHaveLength(3);
+    expect(err).toBeInstanceOf(X402PaymentError);
+    expect(err.kind).toBe('settlement_pending');
+    expect(err.settlement).toEqual(pending);
+  });
+
+  it('throws retries_exhausted after maxRetries payments', async () => {
+    const { instance } = makeShim([{ status: 402, headers: lower() }, { status: 402, headers: lower() }]);
+    const err = await rejection(x402Axios(instance, { pay: async () => PAID, errorOnFailure: true })
+      .request({ url: '/foo' }));
+    expect(err.kind).toBe('retries_exhausted');
+  });
+
+  it('throws server_rejected when no entry is selectable', async () => {
+    const masumi = { ...REQUIRED, accepts: [{ ...ACCEPTED, extra: { assetTransferMethod: 'masumi' } }] };
+    const { instance } = makeShim([{ status: 402, headers: lower(masumi as unknown as PaymentRequired) }]);
+    await expect(x402Axios(instance, { pay: jest.fn(), errorOnFailure: true }).request({ url: '/foo' }))
+      .rejects.toMatchObject({ kind: 'server_rejected' });
+  });
+
+  it('wraps pay handler errors', async () => {
+    const { instance } = makeShim([{ status: 402, headers: lower() }]);
+    const boom = new Error('no funds');
+    const err = await rejection(x402Axios(instance, { pay: async () => { throw boom; } })
+      .request({ url: '/foo' }));
+    expect(err.kind).toBe('pay_handler_failed');
+    expect(err.cause).toBe(boom);
+  });
+
+  it('rejects construction without a pay handler', () => {
+    const { instance } = makeShim([]);
+    expect(() => x402Axios(instance, {} as never)).toThrow(/opts.pay/);
   });
 });

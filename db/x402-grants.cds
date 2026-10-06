@@ -20,11 +20,12 @@
 
 namespace odatano.x402;
 
+@assert.unique: { token: [token] }
 entity X402Grants {
     key id         : UUID;
 
     @description: 'Opaque random token, base64url 32 bytes.'
-        token      : String(64) @assert.unique;
+        token      : String(64);
 
     @description: 'Resource URL this grant unlocks (exact match).'
         route      : String(500);

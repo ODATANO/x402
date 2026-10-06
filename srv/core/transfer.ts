@@ -13,9 +13,10 @@ import { Codes, type X402Code } from './errors';
 import { paymentCredentialOf } from '../helpers/address';
 import { applyScriptParameters, plutusScriptHash, type CoreScriptParam } from '../bridge';
 import type {
+  DecodedOutput,
   DecodedPayment,
   PaymentExtra,
-  PaymentRequirementEntry,
+  PaymentRequirements,
   ScriptClaimExtra,
   ScriptTransferExtra,
   TransferScriptParameter,
@@ -24,6 +25,10 @@ import type {
 const SCRIPT_HASH_RE = /^[0-9a-f]{56}$/;
 const EVEN_HEX_RE    = /^(?:[0-9a-f]{2})+$/;
 const INTEGER_RE     = /^-?\d+$/;
+
+// Applying parameters parses the script; a gate derives the same hash on every request.
+const DERIVED_HASHES_MAX = 256;
+const derivedHashes = new Map<string, string>();
 
 type Failure = { ok: false; code: X402Code; reason: string };
 
@@ -88,7 +93,13 @@ function declaredScriptHash(x: ScriptTransferExtra): { ok: true; hash: string } 
   let hash: string;
   try {
     const params = Object.entries(x.parameters ?? {}).map(([name, p]) => toCoreParam(name, p));
-    hash = plutusScriptHash(params.length > 0 ? applyScriptParameters(code, params) : code, type).toLowerCase();
+    const key = `${type}:${code}:${JSON.stringify(params)}`;
+    const known = derivedHashes.get(key);
+    hash = known ?? plutusScriptHash(params.length > 0 ? applyScriptParameters(code, params) : code, type).toLowerCase();
+    if (!known) {
+      if (derivedHashes.size >= DERIVED_HASHES_MAX) derivedHashes.clear();
+      derivedHashes.set(key, hash);
+    }
   } catch (err) {
     return failure(Codes.SCRIPT_ADDRESS_MISMATCH, `extra.script: ${(err as Error)?.message ?? err}`);
   }
@@ -109,7 +120,7 @@ function canonicalDatum(hex: string): string | null {
 
 /**
  * Why `extra` cannot be offered with this `payTo`, or null when it can.
- * Used by `buildEntry` so a misconfigured seller fails on its own server.
+ * Used by `buildRequirements` so a misconfigured seller fails on its own server.
  */
 export function transferExtraProblem(extra: PaymentExtra | undefined, payTo: string): string | null {
   const method = extra?.assetTransferMethod ?? 'default';
@@ -131,7 +142,9 @@ export function transferExtraProblem(extra: PaymentExtra | undefined, payTo: str
   return null;
 }
 
-export type ScriptTransferResult = { ok: true; claimExtra: ScriptClaimExtra } | Failure;
+export type ScriptTransferResult =
+  | { ok: true; claimExtra: ScriptClaimExtra; paidOutput: DecodedOutput }
+  | Failure;
 
 /**
  * Script-method checks on top of the six mandatory ones. The datum is
@@ -140,8 +153,9 @@ export type ScriptTransferResult = { ok: true; claimExtra: ScriptClaimExtra } | 
  */
 export function verifyScriptTransfer(
   decoded: DecodedPayment,
-  requirement: PaymentRequirementEntry,
+  requirement: PaymentRequirements,
   extra: ScriptTransferExtra,
+  paying: DecodedOutput[],
 ): ScriptTransferResult {
   const declared = declaredScriptHash(extra);
   if (!declared.ok) return declared;
@@ -154,20 +168,23 @@ export function verifyScriptTransfer(
     );
   }
 
-  const locked = decoded.outputs.filter(o => o.address === requirement.payTo);
+  // The datum must sit on an output that carries the payment, not on any output to payTo.
+  let paidOutput = paying[0]!;
   if (extra.datum !== undefined) {
-    const withDatum = locked.filter(o => o.inlineDatumHex !== null);
+    const withDatum = paying.filter(o => o.inlineDatumHex !== null);
     if (withDatum.length === 0) {
-      return failure(Codes.DATUM_MISSING, 'extra.datum is set but no output to payTo carries an inline datum');
+      return failure(Codes.DATUM_MISSING, 'extra.datum is set but the paying output carries no inline datum');
     }
     const expected = canonicalDatum(extra.datum);
-    if (expected === null || !withDatum.some(o => canonicalDatum(o.inlineDatumHex!) === expected)) {
-      return failure(Codes.DATUM_MISMATCH, 'no output to payTo carries the datum from extra.datum');
-    }
+    const match = expected === null ? undefined : withDatum.find(o => canonicalDatum(o.inlineDatumHex!) === expected);
+    if (!match) return failure(Codes.DATUM_MISMATCH, 'the paying output does not carry the datum from extra.datum');
+    paidOutput = match;
   }
 
+  const locked = decoded.outputs.filter(o => o.address === requirement.payTo);
   return {
     ok: true,
+    paidOutput,
     claimExtra: {
       assetTransferMethod: 'script',
       lockRefs: locked.map(o => `${decoded.txHash}#${o.outputIndex}`),

@@ -9,16 +9,16 @@
 
 [![Tests](https://github.com/ODATANO/x402/actions/workflows/test.yaml/badge.svg)](https://github.com/ODATANO/x402/actions/workflows/test.yaml)
 [![Coverage](https://codecov.io/gh/ODATANO/x402/branch/main/graph/badge.svg)](https://codecov.io/gh/ODATANO/x402)
-[![@odatano/core](https://img.shields.io/badge/@odatano/core-2.0.0--rc.31-blue)](https://www.npmjs.com/package/@odatano/core)
+[![@odatano/core](https://img.shields.io/badge/@odatano/core-2.0.0--rc.34-blue)](https://www.npmjs.com/package/@odatano/core)
 [![npm](https://img.shields.io/npm/v/@odatano/x402?color=blue&logo=npm)](https://www.npmjs.com/package/@odatano/x402)
 [![npm downloads](https://img.shields.io/npm/dt/@odatano/x402?logo=npm&label=downloads&color=blue)](https://www.npmjs.com/package/@odatano/x402)
 [![License](https://img.shields.io/badge/license-Apache%202.0-yellow)](LICENSE)
 
 x402 payment gating for SAP CAP applications, backed by Cardano.
 
-Wire a single `before('*')` hook into your CAP service. Every gated request returns **HTTP 402 Payment Required** until the caller proves on-chain settlement. Asset-agnostic: pay in ADA, USDM, or any native asset.
+Gate a CAP service or an Express route with one call. Every gated request answers **HTTP 402 Payment Required** until the caller pays on chain. Asset-agnostic: pay in ADA, USDM, or any native asset, or lock funds at your own contract.
 
-Implements the **Cardano-x402-v2** spec on top of [`@odatano/core`](https://www.npmjs.com/package/@odatano/core).
+Implements x402 v2 with the Cardano `exact` scheme on top of [`@odatano/core`](https://www.npmjs.com/package/@odatano/core), interoperable with the `@x402/cardano` reference implementation in both directions.
 
 ## Use cases
 
@@ -37,7 +37,7 @@ Each page links its reference implementation; runnable versions are listed under
 npm install @odatano/x402 @odatano/core
 ```
 
-`@odatano/core` (the Cardano bridge) is a peer dependency. Install whichever version meets `>=2.0.0-rc.31`.
+`@odatano/core` (the Cardano bridge) is a peer dependency. Install whichever version meets `>=2.0.0-rc.34`.
 
 ## Quick Start
 
@@ -114,16 +114,16 @@ Use-case pages are linked above; the technical references:
 | Doc | Covers |
 |---|---|
 | [`docs/usage.md`](docs/usage.md) | All five usage patterns + full configuration reference |
-| [`docs/protocol.md`](docs/protocol.md) | Buyer-flow diagram, `PAYMENT-SIGNATURE` envelope, the six mandatory facilitator checks |
+| [`docs/protocol.md`](docs/protocol.md) | Payment flow, the three headers, verification rules, settlement |
 | [`docs/architecture.md`](docs/architecture.md) | Module layout, pure-vs-chain split, plugin auto-discovery |
-| [`docs/facilitator-protocol.md`](docs/facilitator-protocol.md) | HTTP wire format for the hosted-facilitator pattern (`httpFacilitator()`) |
+| [`docs/facilitator-protocol.md`](docs/facilitator-protocol.md) | x402 v2 facilitator API (`/verify`, `/settle`, `/supported`) and serving one |
 | [`CHANGELOG.md`](CHANGELOG.md) | Versioned changes, latest first |
 
 ## Requirements
 
 - Node.js 22+
 - `@sap/cds >= 9` (peer)
-- `@odatano/core >= 2.0.0-rc.31` (peer)
+- `@odatano/core >= 2.0.0-rc.34` (peer)
 - `express ^4` (peer), only if you use `x402Middleware`
 - A Cardano backend reachable via `@odatano/core` (Blockfrost / Koios / Ogmios)
 
@@ -132,7 +132,8 @@ Use-case pages are linked above; the technical references:
 ```bash
 npm install                # Workspace install: covers root + examples/*
 npm run build              # tsc, emits .js/.d.ts next to .ts (outDir: .)
-npm test                   # 232 tests, ~13s
+npm run typecheck          # sources and tests
+npm test                   # unit tests
 ```
 
 ## License

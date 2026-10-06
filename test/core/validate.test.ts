@@ -1,317 +1,242 @@
-// decode() pulls in srv/bridge → @odatano/core; stub the barrel to its
-// pure parser (see core-parse-mock) so its uncompiled .ts isn't loaded.
+// decodePayment pulls in srv/bridge → @odatano/core; stub the barrel to its pure parser.
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 jest.mock('@odatano/core', () => require('../fixtures/core-parse-mock').coreParseMock());
 
-import { validatePayment, pickRequirement } from '../../srv/core/validate';
+import { Address, Credential } from '@harmoniclabs/buildooor';
+import { validatePayment, matchOutput, buildClaim } from '../../srv/core/validate';
+import { decodePayment } from '../../srv/core/decode';
 import { Codes } from '../../srv/core/errors';
 import {
-  BUYER_PRIV, BUYER_ADDR, SELLER_ADDR,
+  BUYER_PRIV, BUYER_ADDR, SELLER_ADDR, SELLER_VKH,
   NONCE_TX_HASH, NONCE_INDEX, NONCE_REF,
-  CURRENT_SLOT, FUTURE_SLOT, PAST_SLOT,
-  TEST_POLICY_ID, TEST_ASSET_NAME, TEST_ASSET_STRING,
-  USDM_PREPROD_ASSET,
-  NETWORK_PREPROD, NETWORK_MAINNET,
+  CURRENT_SLOT, TTL_SLOT, MAX_TTL_SLOT, PAST_SLOT,
+  TEST_POLICY_ID, TEST_ASSET_NAME, TEST_ASSET_STRING, TEST_ASSET_UNIT,
+  NETWORK_PREPROD,
 } from '../fixtures/constants';
-import { buildBody, signTx, buildUnsigned } from '../fixtures/build-tx';
-import { buildEnvelope } from '../fixtures/envelope';
-import { decode } from '../../srv/core/decode';
-import {
-  buildEntry,
-  buildPaymentRequirementsMulti,
-  buildPaymentRequirements,
-} from '../../srv/core/requirements';
-import type {
-  PaymentRequirementEntry,
-  PaymentRequirementsBody,
-} from '../../srv/core/types';
+import { buildBody, signTx, buildUnsigned, type TestOutput } from '../fixtures/build-tx';
+import type { DecodedPayment, PaymentExtra, PaymentRequirements } from '../../srv/core/types';
 
-/** Build a fully-decoded payment + the matching requirements entry. */
-function makeFixture({
-  outputs,
-  asset = 'lovelace',
-  amount = '1000000',
-  ttlSlot,
-  withWitness = true,
-  inputTxHash = NONCE_TX_HASH,
-  network = NETWORK_PREPROD,
-}: {
-  outputs: Array<{
-    address: string;
-    lovelace: string;
-    assets?: Array<{ policyId: string; nameHex: string; qty: string }>;
-  }>;
-  asset?: string;
-  amount?: string;
-  ttlSlot?: number | null;
-  withWitness?: boolean;
-  inputTxHash?: string;
-  network?: string;
-}) {
-  const body = buildBody({
-    inputs: [{ txHash: inputTxHash, outputIndex: NONCE_INDEX }],
-    outputs,
-    ...(ttlSlot !== null ? { ttlSlot: ttlSlot ?? FUTURE_SLOT } : {}),
-  });
-  const signed = withWitness ? signTx(body, [BUYER_PRIV]) : buildUnsigned(body);
-  const header = buildEnvelope({ txCborHex: signed.cborHex, nonceRef: NONCE_REF, network });
-  const decoded = decode(header);
-  const requirements: PaymentRequirementEntry = buildEntry({
-    amount,
-    asset,
-    payTo: SELLER_ADDR,
-    network: NETWORK_PREPROD,
-    resource: '/r',
-  });
-  return { decoded, requirements };
+const SELLER_MAINNET = Address.mainnet(Credential.keyHash(SELLER_VKH)).toString();
+
+function requirements(change: Partial<PaymentRequirements> = {}): PaymentRequirements {
+  return {
+    scheme: 'exact', network: NETWORK_PREPROD, asset: 'lovelace', amount: '1000000',
+    payTo: SELLER_ADDR, maxTimeoutSeconds: 600, extra: { areFeesSponsored: false }, ...change,
+  };
 }
 
-describe('validatePayment, check 1: network', () => {
-  it('rejects mismatched network', () => {
-    const { decoded, requirements } = makeFixture({
-      outputs: [{ address: SELLER_ADDR, lovelace: '1000000' }],
-      network: NETWORK_MAINNET,
-    });
-    const r = validatePayment(decoded, requirements, { currentSlot: CURRENT_SLOT });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.code).toBe(Codes.NETWORK_MISMATCH);
-  });
-});
+interface TxArgs {
+  outputs?: TestOutput[];
+  ttlSlot?: number | null;
+  validityStartSlot?: number;
+  inputTxHash?: string;
+  signed?: boolean;
+  /** false builds a tx that declares a failing script. */
+  scriptValid?: boolean;
+}
 
-describe('validatePayment, check 2: recipient', () => {
-  it('rejects when no output is to payTo', () => {
-    const { decoded, requirements } = makeFixture({
-      outputs: [{ address: BUYER_ADDR, lovelace: '1000000' }],
-    });
-    const r = validatePayment(decoded, requirements, { currentSlot: CURRENT_SLOT });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.code).toBe(Codes.WRONG_RECIPIENT);
+function decoded(args: TxArgs = {}): DecodedPayment {
+  const body = buildBody({
+    inputs: [{ txHash: args.inputTxHash ?? NONCE_TX_HASH, outputIndex: NONCE_INDEX }],
+    outputs: args.outputs ?? [{ address: SELLER_ADDR, lovelace: '1000000' }, { address: BUYER_ADDR, lovelace: '5000000' }],
+    ...(args.ttlSlot === null ? {} : { ttlSlot: args.ttlSlot ?? TTL_SLOT }),
+    ...(args.validityStartSlot !== undefined ? { validityStartSlot: args.validityStartSlot } : {}),
   });
-});
+  const tx = args.signed === false ? buildUnsigned(body) : signTx(body, [BUYER_PRIV], args.scriptValid ?? true);
+  return decodePayment({
+    x402Version: 2,
+    accepted: requirements(),
+    payload: { transaction: Buffer.from(tx.cborHex, 'hex').toString('base64'), nonce: NONCE_REF },
+  });
+}
 
-describe('validatePayment, check 3: amount', () => {
-  it('rejects insufficient amount', () => {
-    const { decoded, requirements } = makeFixture({
-      outputs: [{ address: SELLER_ADDR, lovelace: '500000' }],
-      asset: 'lovelace',
-      amount: '1000000',
-    });
-    const r = validatePayment(decoded, requirements, { currentSlot: CURRENT_SLOT });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.code).toBe(Codes.INSUFFICIENT_AMOUNT);
-  });
+const opts = { currentSlot: CURRENT_SLOT, maxTtlSlot: MAX_TTL_SLOT };
 
-  it('sums outputs to payTo across multiple outputs', () => {
-    const { decoded, requirements } = makeFixture({
-      outputs: [
-        { address: SELLER_ADDR, lovelace: '600000' },
-        { address: SELLER_ADDR, lovelace: '500000' }, // total 1_100_000 ≥ 1_000_000
-      ],
-      asset: 'lovelace',
-      amount: '1000000',
-    });
-    const r = validatePayment(decoded, requirements, { currentSlot: CURRENT_SLOT });
-    expect(r.ok).toBe(true);
-    if (r.ok) expect(r.claim.amountUnits).toBe('1100000');
-  });
-});
-
-describe('validatePayment, check 4: asset', () => {
-  it('rejects when payTo receives only the wrong asset', () => {
-    // payTo gets lovelace; requirements want a native asset
-    const { decoded, requirements } = makeFixture({
-      outputs: [{ address: SELLER_ADDR, lovelace: '1000000' }],
-      asset: TEST_ASSET_STRING,
-      amount: '5',
-    });
-    const r = validatePayment(decoded, requirements, { currentSlot: CURRENT_SLOT });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.code).toBe(Codes.WRONG_ASSET);
-  });
-
-  it('matches exact policy + name', () => {
-    const { decoded, requirements } = makeFixture({
-      outputs: [{
-        address: SELLER_ADDR,
-        lovelace: '1500000',
-        assets: [{ policyId: TEST_POLICY_ID, nameHex: TEST_ASSET_NAME, qty: '5' }],
-      }],
-      asset: TEST_ASSET_STRING,
-      amount: '5',
-    });
-    const r = validatePayment(decoded, requirements, { currentSlot: CURRENT_SLOT });
-    expect(r.ok).toBe(true);
-    if (r.ok) {
-      expect(r.claim.amountUnits).toBe('5');
-      expect(r.claim.unit).toBe((TEST_POLICY_ID + TEST_ASSET_NAME).toLowerCase());
-    }
-  });
-});
-
-describe('validatePayment, check 5a: nonce input reference', () => {
-  it('rejects when nonce UTxO is not referenced as a tx input', () => {
-    // Build a fixture where the input txHash is NOT the nonce txHash
-    const other = 'cafe'.repeat(16);
-    const { decoded, requirements } = makeFixture({
-      outputs: [{ address: SELLER_ADDR, lovelace: '1000000' }],
-      inputTxHash: other,
-    });
-    const r = validatePayment(decoded, requirements, { currentSlot: CURRENT_SLOT });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.code).toBe(Codes.NONCE_NOT_REFERENCED);
-  });
-});
-
-describe('validatePayment, check 6: TTL', () => {
-  it('rejects expired TTL', () => {
-    const { decoded, requirements } = makeFixture({
-      outputs: [{ address: SELLER_ADDR, lovelace: '1000000' }],
-      ttlSlot: PAST_SLOT,
-    });
-    const r = validatePayment(decoded, requirements, { currentSlot: CURRENT_SLOT });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.code).toBe(Codes.EXPIRED_TTL);
-  });
-
-  it('rejects no-TTL tx in strict mode (default)', () => {
-    const { decoded, requirements } = makeFixture({
-      outputs: [{ address: SELLER_ADDR, lovelace: '1000000' }],
-      ttlSlot: null,
-    });
-    const r = validatePayment(decoded, requirements, { currentSlot: CURRENT_SLOT });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.code).toBe(Codes.EXPIRED_TTL);
-  });
-
-  it('accepts no-TTL tx when allowNoTtl=true', () => {
-    const { decoded, requirements } = makeFixture({
-      outputs: [{ address: SELLER_ADDR, lovelace: '1000000' }],
-      ttlSlot: null,
-    });
-    const r = validatePayment(decoded, requirements, { currentSlot: CURRENT_SLOT, allowNoTtl: true });
-    expect(r.ok).toBe(true);
-  });
-
-  it('treats currentSlot == ttlSlot as expired (boundary)', () => {
-    const { decoded, requirements } = makeFixture({
-      outputs: [{ address: SELLER_ADDR, lovelace: '1000000' }],
-      ttlSlot: CURRENT_SLOT,
-    });
-    const r = validatePayment(decoded, requirements, { currentSlot: CURRENT_SLOT });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.code).toBe(Codes.EXPIRED_TTL);
-  });
-});
-
-describe('validatePayment, supporting: unsigned tx', () => {
-  it('rejects when no vkey witnesses present', () => {
-    const { decoded, requirements } = makeFixture({
-      outputs: [{ address: SELLER_ADDR, lovelace: '1000000' }],
-      withWitness: false,
-    });
-    const r = validatePayment(decoded, requirements, { currentSlot: CURRENT_SLOT });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.code).toBe(Codes.UNSIGNED_TRANSACTION);
-  });
-});
+function codeOf(d: DecodedPayment, r = requirements(), o: Parameters<typeof validatePayment>[2] = opts): string | undefined {
+  const v = validatePayment(d, r, o);
+  return v.ok ? undefined : v.code;
+}
 
 describe('validatePayment, happy path', () => {
-  it('returns a populated PaymentClaim', () => {
-    const { decoded, requirements } = makeFixture({
-      outputs: [{ address: SELLER_ADDR, lovelace: '1000000' }],
-    });
-    const r = validatePayment(decoded, requirements, { currentSlot: CURRENT_SLOT });
-    expect(r.ok).toBe(true);
-    if (r.ok) {
-      expect(r.claim).toMatchObject({
-        amountUnits: '1000000',
-        network: NETWORK_PREPROD,
-        nonceRef: NONCE_REF,
-        asset: 'lovelace',
-        resourceUrl: '/r',
-        txHash: decoded.txHash,
-      });
-    }
+  it('accepts a correct payment and reports the matched amount', () => {
+    const v = validatePayment(decoded(), requirements(), opts);
+    expect(v).toEqual({ ok: true, match: { amountUnits: '1000000', unit: '' } });
+  });
+
+  it('accepts overpayment', () => {
+    expect(codeOf(decoded({ outputs: [{ address: SELLER_ADDR, lovelace: '3000000' }] }))).toBeUndefined();
+  });
+
+  it('accepts a native-asset payment', () => {
+    const d = decoded({ outputs: [{
+      address: SELLER_ADDR, lovelace: '1500000',
+      assets: [{ policyId: TEST_POLICY_ID, nameHex: TEST_ASSET_NAME, qty: '10' }],
+    }] });
+    const v = validatePayment(d, requirements({ asset: TEST_ASSET_STRING, amount: '10' }), opts);
+    expect(v).toEqual({ ok: true, match: { amountUnits: '10', unit: TEST_ASSET_UNIT } });
   });
 });
 
-describe('pickRequirement', () => {
-  it('returns the only entry when accepts has length 1 and network matches', () => {
-    const { decoded } = makeFixture({
-      outputs: [{ address: SELLER_ADDR, lovelace: '1000000' }],
-    });
-    const body: PaymentRequirementsBody = buildPaymentRequirements({
-      amount:   '500000',
-      asset:    'lovelace',
-      payTo:    SELLER_ADDR,
-      network:  NETWORK_PREPROD,
-      resource: '/r',
-    });
-    const r = pickRequirement(decoded, body);
-    expect(r.ok).toBe(true);
-    if (r.ok) expect(r.entry).toBe(body.accepts[0]);
+describe('validatePayment, rules', () => {
+  it('rejects an unsigned transaction', () => {
+    expect(codeOf(decoded({ signed: false }))).toBe(Codes.UNSIGNED_TRANSACTION);
   });
 
-  it('rejects with network_mismatch when no entry matches the envelope network', () => {
-    const { decoded } = makeFixture({
-      outputs: [{ address: SELLER_ADDR, lovelace: '1000000' }],
-      network: NETWORK_MAINNET, // envelope says mainnet
-    });
-    const body = buildPaymentRequirements({
-      amount: '1', asset: 'lovelace', payTo: SELLER_ADDR,
-      network: NETWORK_PREPROD, resource: '/r',
-    });
-    const r = pickRequirement(decoded, body);
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.code).toBe(Codes.NETWORK_MISMATCH);
+  it('rejects an unsupported transfer method', () => {
+    const r = requirements({ extra: { assetTransferMethod: 'masumi' } as unknown as PaymentExtra });
+    expect(codeOf(decoded(), r)).toBe(Codes.UNSUPPORTED_METHOD);
   });
 
-  it('picks the entry whose asset+payTo matches a paid output (multi-accept)', () => {
-    // Buyer pays USDM, not ADA. Server offered both options.
-    const { decoded } = makeFixture({
-      outputs: [{
-        address:  SELLER_ADDR,
-        lovelace: '1000000', // min-ADA, ignored as payment asset
-        assets:   [{
-          policyId: '16a55b2a349361ff88c03788f93e1e966e5d689605d044fef722ddde',
-          nameHex:  '0014df105553444d',
-          qty:      '100000',
-        }],
-      }],
-    });
-    const body = buildPaymentRequirementsMulti({
-      payTo:    SELLER_ADDR,
-      network:  NETWORK_PREPROD,
-      resource: '/r',
-      options: [
-        { amount: '500000', asset: 'lovelace' },         // not paid in this currency
-        { amount: '100000', asset: USDM_PREPROD_ASSET }, // ← what the buyer actually paid
-      ],
-    });
-    const r = pickRequirement(decoded, body);
-    expect(r.ok).toBe(true);
-    if (r.ok) expect(r.entry.asset).toBe(USDM_PREPROD_ASSET);
+  it('rejects an output on another network (rule 1)', () => {
+    const d = decoded({ outputs: [{ address: SELLER_ADDR, lovelace: '1000000' }, { address: SELLER_MAINNET, lovelace: '2000000' }] });
+    expect(codeOf(d)).toBe(Codes.NETWORK_MISMATCH);
   });
 
-  it('rejects with wrong_asset when no multi-accept entry matches the paid output', () => {
-    const { decoded } = makeFixture({
-      outputs: [{ address: SELLER_ADDR, lovelace: '1000000' }],
+  it('accepts all outputs on the required network (rule 1)', () => {
+    const d = decoded({ outputs: [{ address: SELLER_MAINNET, lovelace: '1000000' }] });
+    expect(codeOf(d, requirements({ network: 'cardano:mainnet', payTo: SELLER_MAINNET }))).toBeUndefined();
+  });
+
+  it('rejects when no output goes to payTo (rule 2)', () => {
+    expect(codeOf(decoded({ outputs: [{ address: BUYER_ADDR, lovelace: '9000000' }] }))).toBe(Codes.WRONG_RECIPIENT);
+  });
+
+  it('rejects two outputs that only sum to the amount (rule 3)', () => {
+    const d = decoded({ outputs: [
+      { address: SELLER_ADDR, lovelace: '600000' },
+      { address: SELLER_ADDR, lovelace: '600000' },
+    ] });
+    expect(codeOf(d)).toBe(Codes.INSUFFICIENT_AMOUNT);
+  });
+
+  it('accepts when one of several payTo outputs covers the amount (rule 3)', () => {
+    const d = decoded({ outputs: [
+      { address: SELLER_ADDR, lovelace: '400000' },
+      { address: SELLER_ADDR, lovelace: '1200000' },
+    ] });
+    const v = validatePayment(d, requirements(), opts);
+    expect(v.ok && v.match.amountUnits).toBe('1200000');
+  });
+
+  it('rejects a payTo output without the asset (rule 4)', () => {
+    const d = decoded({ outputs: [{ address: SELLER_ADDR, lovelace: '2000000' }] });
+    expect(codeOf(d, requirements({ asset: TEST_ASSET_STRING, amount: '1' }))).toBe(Codes.WRONG_ASSET);
+  });
+
+  it('rejects a nonce that is not an input (rule 5)', () => {
+    expect(codeOf(decoded({ inputTxHash: 'beef'.repeat(16) }))).toBe(Codes.NONCE_NOT_REFERENCED);
+  });
+
+  it('rejects a transaction that mints (rule 6)', () => {
+    const d: DecodedPayment = {
+      ...decoded(),
+      mint: [{ unit: TEST_ASSET_UNIT, policyId: TEST_POLICY_ID, assetNameHex: TEST_ASSET_NAME, quantity: '1' }],
+    };
+    expect(codeOf(d)).toBe(Codes.PHASE1_INVALID);
+  });
+
+  it('rejects withdrawals, certificates and other body content (rule 6)', () => {
+    expect(codeOf({ ...decoded(), extraBodyContent: ['withdrawals'] })).toBe(Codes.PHASE1_INVALID);
+    expect(codeOf({ ...decoded(), extraBodyContent: ['certificates', 'treasury donation'] })).toBe(Codes.PHASE1_INVALID);
+  });
+
+  it('rejects a transaction marked invalid: its outputs would never exist', () => {
+    expect(codeOf({ ...decoded(), isValid: false })).toBe(Codes.PHASE2_INVALID);
+    expect(codeOf({ ...decoded(), isValid: true })).toBeUndefined();
+  });
+
+  it('rejects a vkey witness whose signature does not verify (rule 6)', () => {
+    expect(codeOf({ ...decoded(), witnessErrors: ['witness 0 does not verify'] })).toBe(Codes.INVALID_SIGNATURE);
+  });
+
+  it('rejects a body network id of another network (rule 1)', () => {
+    expect(codeOf({ ...decoded(), networkId: 1 })).toBe(Codes.NETWORK_MISMATCH);
+    expect(codeOf({ ...decoded(), networkId: 0 })).toBeUndefined();
+    expect(codeOf({ ...decoded(), networkId: null })).toBeUndefined();
+  });
+
+  it('accepts requirements that name the network by its CIP-34 alias', () => {
+    expect(codeOf(decoded(), { ...requirements(), network: 'cip34:0-1' as never })).toBeUndefined();
+    expect(codeOf(decoded(), { ...requirements(), network: 'cip34:1-764824073' as never })).toBe(Codes.NETWORK_MISMATCH);
+  });
+
+  it('rejects a transaction whose validity flag is false, as read by the real parser', () => {
+    const d = decoded({ scriptValid: false });
+    expect(d.isValid).toBe(false);
+    expect(codeOf(d)).toBe(Codes.PHASE2_INVALID);
+    expect(decoded().isValid).toBe(true);
+  });
+
+  it('rejects a transaction without TTL (rule 7)', () => {
+    expect(codeOf(decoded({ ttlSlot: null }))).toBe(Codes.EXPIRED_TTL);
+  });
+
+  it('rejects an expired TTL (rule 7)', () => {
+    expect(codeOf(decoded({ ttlSlot: PAST_SLOT }))).toBe(Codes.EXPIRED_TTL);
+    expect(codeOf(decoded({ ttlSlot: CURRENT_SLOT }))).toBe(Codes.EXPIRED_TTL);
+  });
+
+  it('rejects a validity start in the future (rule 6)', () => {
+    expect(codeOf(decoded({ validityStartSlot: CURRENT_SLOT + 1 }))).toBe(Codes.NOT_YET_VALID);
+  });
+
+  it('accepts a validity start that is reached', () => {
+    expect(codeOf(decoded({ validityStartSlot: CURRENT_SLOT }))).toBeUndefined();
+  });
+
+  it('rejects a TTL beyond maxTtlSlot (rule 7)', () => {
+    expect(codeOf(decoded({ ttlSlot: MAX_TTL_SLOT + 1 }))).toBe(Codes.TTL_TOO_FAR);
+  });
+
+  it('accepts a TTL at maxTtlSlot, and any TTL when no bound is given', () => {
+    expect(codeOf(decoded({ ttlSlot: MAX_TTL_SLOT }))).toBeUndefined();
+    expect(codeOf(decoded({ ttlSlot: MAX_TTL_SLOT + 5000 }), requirements(), { currentSlot: CURRENT_SLOT })).toBeUndefined();
+  });
+
+  it('skips the window checks when the ledger already accepted the tx', () => {
+    const accepted = { ...opts, alreadyAccepted: true };
+    expect(codeOf(decoded({ ttlSlot: PAST_SLOT }), requirements(), accepted)).toBeUndefined();
+    expect(codeOf(decoded({ validityStartSlot: CURRENT_SLOT + 9 }), requirements(), accepted)).toBeUndefined();
+    expect(codeOf(decoded({ ttlSlot: MAX_TTL_SLOT + 1 }), requirements(), accepted)).toBeUndefined();
+  });
+
+  it('still requires a TTL when the ledger already accepted the tx', () => {
+    expect(codeOf(decoded({ ttlSlot: null }), requirements(), { ...opts, alreadyAccepted: true })).toBe(Codes.EXPIRED_TTL);
+  });
+});
+
+describe('matchOutput', () => {
+  it('matches without the chain-free checks of validatePayment', () => {
+    expect(matchOutput(decoded({ signed: false }), requirements())).toEqual({ ok: true, match: { amountUnits: '1000000', unit: '' } });
+  });
+
+  it('rejects an insufficient payment', () => {
+    const m = matchOutput(decoded({ outputs: [{ address: SELLER_ADDR, lovelace: '999999' }] }), requirements());
+    expect(m.ok ? undefined : m.code).toBe(Codes.INSUFFICIENT_AMOUNT);
+  });
+});
+
+describe('buildClaim', () => {
+  it('builds the claim of a verified payment', () => {
+    const d = decoded();
+    const r = requirements();
+    expect(buildClaim(d, r, { amountUnits: '1000000', unit: '' }, '/r', BUYER_ADDR)).toEqual({
+      txHash:      d.txHash,
+      amountUnits: '1000000',
+      network:     NETWORK_PREPROD,
+      unit:        '',
+      asset:       'lovelace',
+      payTo:       SELLER_ADDR,
+      resourceUrl: '/r',
+      nonceRef:    NONCE_REF,
+      payerAddr:   BUYER_ADDR,
     });
-    // Server demands a native token, buyer paid ADA. No entry matches.
-    const body = buildPaymentRequirementsMulti({
-      payTo:    SELLER_ADDR,
-      network:  NETWORK_PREPROD,
-      resource: '/r',
-      options: [
-        { amount: '1', asset: USDM_PREPROD_ASSET },
-        { amount: '1', asset: TEST_ASSET_STRING  },
-      ],
-    });
-    const r = pickRequirement(decoded, body);
-    expect(r.ok).toBe(false);
-    if (!r.ok) {
-      expect(r.code).toBe(Codes.WRONG_ASSET);
-      expect(r.reason).toMatch(USDM_PREPROD_ASSET);
-    }
+  });
+
+  it('omits payerAddr when unknown and carries script extra', () => {
+    const extra = { assetTransferMethod: 'script' as const, lockRefs: ['x#0'] };
+    const c = buildClaim(decoded(), requirements(), { amountUnits: '1', unit: '', extra }, '/r');
+    expect(c).not.toHaveProperty('payerAddr');
+    expect(c.extra).toEqual(extra);
   });
 });

@@ -4,6 +4,46 @@ All notable changes to `@odatano/x402` are documented here. The format follows [
 
 **Pre-1.0 caveat:** minor versions may include breaking changes until `1.0.0`.
 
+## [0.7.0] - 2026-10-06
+
+Conforms to x402 v2 and the Cardano `exact` scheme as specified in cardano-foundation/x402, interoperable with `@x402/cardano` in all four directions (client, resource server, facilitator, facilitator router).
+
+### Breaking
+- **Wire format.** The 402 travels in the `PAYMENT-REQUIRED` header (`PaymentRequired` with `resource` at the top level, `extensions`), the payment in `PAYMENT-SIGNATURE` as `PaymentPayload` (`accepted`, `resource`, `payload`), the result in `PAYMENT-RESPONSE` as `SettlementResponse` (`payer`, `amount`, `extra.status`, `extra.confirmations`). `X-PAYMENT-RESPONSE`, the old envelope and `402 { pending: true }` are gone.
+- **`accepted` is matched exactly** against the offered entries; the output heuristic of `pickRequirement` is gone. Requirements must be the same on the paid retry, or use `issuedRequirements`.
+- **Flow `authorization`.** The middlewares verify, run the handler, then settle. A failed handler is not settled; a failed settlement replaces the response with a 402. In CAP the handler's transaction commits before settlement, so its writes stay and a pending retry runs it again. `req.payment` is the verified claim while the handler runs.
+- **Facilitator API.** `Facilitator` has `verify`, `settle` and `supported`; `httpFacilitator` and `createFacilitatorRouter` speak `POST /verify`, `POST /settle`, `GET /supported` (`kinds`, `extensions`, `signers`). `/verify-settle`, `verifyAndSettle`, `onRejected` and `onPending` are gone; the router has `onSettle`.
+- **Reason codes** follow the x402 v2 core codes and `@x402/cardano` (e.g. `invalid_exact_cardano_payload_recipient_mismatch`, `settlement_pending`, `duplicate_settlement`). A malformed payload answers 400.
+- **Renamed:** `buildEntry` → `buildRequirements`, `buildPaymentRequirementsMulti` → `buildPaymentRequired`, `PaymentRequirementEntry` → `PaymentRequirements`, `PaymentRequirementsBody` → `PaymentRequired`, `ResourceDescriptor` → `ResourceInfo`, `encodePaymentEnvelope` → `encodePaymentPayload`, `paymentErrorFromBody` → `paymentErrorFrom`, error kind `invalid_402_body` → `invalid_payment_required`.
+- **Removed:** `pendingGraceMs` (it delivered one payment several times), `allowNoTtl` (a TTL is required), `ttlSlotsFromNow` (now `ttlSeconds`, capped at `maxTimeoutSeconds`), `RouteOption.description` and `mimeType`, `ResourceInfo.outputSchema`, `verifyPayment`, `checkNonceUnspent`, `checkTransfer`, `flatRequirements`.
+- **`PayHandler`** receives `(requirement, paymentRequired)`.
+- **Lovelace below min-UTxO** is refused when building, as the spec requires; `ensureMinAda` applies to native-asset outputs only.
+- **Requires `@odatano/core` >= 2.0.0-rc.34** (`verifyTxWitnesses`, `posixToSlot`, `slotToPosixMs`, extended `parseTransaction` incl. `isValid`).
+
+### Added
+- **Full verification rules:** body network id and output addresses (rule 1), one output must cover the amount (3), every input unspent (5), vkey signatures valid and every key-locked input signed, value conservation per asset, fee floor, no mint, withdrawals, certificates, governance or donation, validity start reached, validity flag not false (6), TTL not beyond now + `maxTimeoutSeconds` (7), min-UTxO of the `payTo` output (8).
+- **`confirmationPolicy`** (`l1Confirmations` -1..20, default 1) on the middlewares and in requirements; settle waits for that depth. `-1` needs `allowMempoolConfirmation` on the facilitator.
+- **One delivery per payment:** settlement claims per transaction id, `duplicate_settlement` for a second delivery. Pending retries resume; a transaction a backend took is never submitted again, one whose submit got no clear answer is. A claim held by a call that died is taken over after its lease. All gates of a process share `defaultFacilitator()`; `cdsSettlementStore` (entity `odatano.x402.X402Settlements`) or `settlements: true` on `gateService` for several instances.
+- **Gate records commit on their own:** settlement claims, receipts and grants are written in separate transactions, independent of the request's.
+- **Facilitator checks its backend's network** (`invalid_network` otherwise) and lists only that network in `/supported`. A payment that landed as a failed script run is `invalid_exact_cardano_payload_phase2_invalid`.
+- **`issuedRequirements`** (`memoryIssuedRequirementsStore`): match the paid retry against what the 402 offered, for requirements that differ per request.
+- **CIP-34 network aliases** (`cip34:1-764824073`, `cip34:0-1`, `cip34:0-2`) accepted and normalized.
+- **`areFeesSponsored: false`** in every entry; `ResourceInfo` fields `serviceName`, `tags`, `iconUrl`; `extensions` echoed by the clients.
+- **Clients** skip entries with an unknown `paymentFlow`.
+- **`examples/interop-cf`:** live checks against `@x402/cardano` on preview.
+
+### Changed
+- **A pending settlement is settled once more** before the 402 goes out, as other x402 resource servers do; many clients do not re-send on a pending 402.
+- **`npm run typecheck`** checks sources and tests; CI runs it (ts-jest transpiles without type checks).
+- **`npm run build`** generates the CDS model types first (`cds-typer`).
+
+### Fixed
+- **`verifyConfirmedPayment`** read output amounts in a shape `@odatano/core` does not return, so every payment looked unpaid. It reads `outputs[].amount[]` now.
+- **Unique constraints on `X402Receipts.txHash` and `X402Grants.token` are enforced.** The annotation sat on the element, where it has no effect; it is on the entity now. Schema change: a deployment with duplicate rows must clean them up first.
+
+### Known limitation
+- **Paying a seller whose facilitator is `@x402/cardano` (up to at least 2.28.0) fails at submission.** That facilitator re-encodes the signed transaction before submitting it; for transactions not built with its own serializer the body hash changes and the witnesses no longer match. Verification passes. All other combinations work, checked live on preview with `examples/interop-cf`: its clients paying our servers, our facilitator behind its servers, our clients and servers among themselves.
+
 ## [0.6.1] - 2026-10-06
 
 ### Changed

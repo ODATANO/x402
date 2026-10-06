@@ -6,12 +6,10 @@
  * to, and so renames in core (`getTransaction` → `getTransactionByHash`)
  * stay isolated to this file.
  *
- * Two methods specific to Cardano-x402-v2 are first-class on
- * `@odatano/core` since `1.7.8` (our minimum peer):
- *   - `isUtxoUnspent(txHash, outputIndex)` for replay-defense check 5b
- *   - `getCurrentSlot()`                   for TTL check 6
- *
- * Both are called through directly here; no shim layer remains.
+ * The verification rules use `isUtxoUnspent` (rule 5), `getCurrentSlot`
+ * and the slot conversion (rule 7), the fee parameters (rules 6 and 8),
+ * the tip height (confirmations) and the pure parse, witness and script
+ * helpers.
  */
 
 import { X402Error, Codes } from './core/errors';
@@ -36,8 +34,9 @@ interface RawUtxo {
 }
 interface CardanoClient {
   getAddressUtxos(address: string): Promise<RawUtxo[]>;
-  getTransaction(txHash: string): Promise<unknown>;
-  getProtocolParameters(): Promise<unknown>;
+  getTransaction(txHash: string): Promise<ChainTx>;
+  getProtocolParameters(): Promise<RawProtocolParameters>;
+  getLatestBlock(): Promise<{ height: number | null }>;
   submitTransaction(cborHex: string): Promise<string>;
   getCurrentSlot(): Promise<number>;
   isUtxoUnspent(txHash: string, outputIndex: number): Promise<boolean>;
@@ -56,6 +55,7 @@ interface CardanoTxBuilder {
 interface OdatanoModule {
   initialize(): Promise<unknown>;
   shutdown(): Promise<unknown>;
+  getStatus(): { initialized: boolean; network?: string };
   getCardanoClient(): CardanoClient;
   getCardanoTxBuilder(): CardanoTxBuilder;
 }
@@ -143,11 +143,41 @@ export async function getUtxosAtAddress(address: string): Promise<BridgeUtxo[]> 
   return Array.isArray(rows) ? rows.map(mapUtxo) : [];
 }
 
+/** The fields of core's normalized transaction x402 reads. */
+export interface ChainTxOutput {
+  address: string;
+  amount: Array<{ unit: string; quantity: string }>;
+  outputIndex: number;
+  /** The collateral return: it exists only when a script of the transaction failed. */
+  isCollateral?: boolean;
+}
+export interface ChainTx {
+  hash: string;
+  blockHeight: number | null;
+  /** POSIX seconds. */
+  blockTime: number | null;
+  outputs: ChainTxOutput[];
+  /** True when a script failed: only the collateral was spent, the outputs do not exist. Unset when the backend does not report it. */
+  spendsCollaterals?: boolean;
+}
+
+/** The outputs `tx` created on chain: its regular ones, or only the collateral return after a failed script. */
+export function createdOutputs(tx: ChainTx): ChainTxOutput[] {
+  const failed = tx.spendsCollaterals === true;
+  return tx.outputs.filter(o => Boolean(o.isCollateral) === failed);
+}
+
+interface RawProtocolParameters {
+  minFeeA: number;
+  minFeeB: number;
+  coinsPerUtxoSize: string | null;
+}
+
 /**
  * Fetch a tx by hash. Returns `null` on 404 (tx not on chain yet) so
  * the settle/verify-confirmed paths can poll without try/catch noise.
  */
-export async function getTransactionByHash(txHash: string): Promise<unknown> {
+export async function getTransactionByHash(txHash: string): Promise<ChainTx | null> {
   if (!txHash) throw new TypeError('getTransactionByHash: txHash required');
   await ensureInit();
   try {
@@ -166,10 +196,80 @@ export async function getProtocolParameters(): Promise<unknown> {
   return od.getCardanoClient().getProtocolParameters();
 }
 
+/** Live parameters for the fee floor and min-UTxO. */
+export interface FeeParameters {
+  minFeeA: bigint;
+  minFeeB: bigint;
+  /** null when the backend does not report it */
+  coinsPerUtxoByte: bigint | null;
+}
+
+export async function getFeeParameters(): Promise<FeeParameters> {
+  await ensureInit();
+  const p = await od.getCardanoClient().getProtocolParameters();
+  return {
+    minFeeA:          BigInt(p.minFeeA),
+    minFeeB:          BigInt(p.minFeeB),
+    coinsPerUtxoByte: p.coinsPerUtxoSize != null ? BigInt(p.coinsPerUtxoSize) : null,
+  };
+}
+
+/** The network the backend is connected to, e.g. `cardano:preview`; null when core does not report it. */
+export async function getBackendNetwork(): Promise<string | null> {
+  await ensureInit();
+  const network = od.getStatus().network;
+  return network ? `cardano:${network}` : null;
+}
+
+/** Block height of the chain tip. */
+export async function getTipHeight(): Promise<number> {
+  await ensureInit();
+  const { height } = await od.getCardanoClient().getLatestBlock();
+  if (typeof height !== 'number') {
+    throw new X402Error(Codes.BRIDGE_UNAVAILABLE, 'backend reports no tip height');
+  }
+  return height;
+}
+
+/** How a submit ended. */
+export type SubmitOutcome =
+  /** The backend took the transaction, or already had it. */
+  | { kind: 'accepted' }
+  /** The ledger refused it. */
+  | { kind: 'rejected'; reason: string }
+  /** No clear answer (rate limit, outage, timeout): it may or may not be on its way. */
+  | { kind: 'unknown'; reason: string };
+
+const REJECTION_STATUSES = new Set([400, 422]);
+
+function isRejection(err: unknown): boolean {
+  const e = err as { statusCode?: unknown; errors?: unknown };
+  if (Array.isArray(e?.errors) && e.errors.length > 0) return e.errors.every(isRejection);
+  return REJECTION_STATUSES.has(Number(e?.statusCode));
+}
+
+function isAlreadySubmitted(err: unknown): boolean {
+  const e = err as { statusCode?: unknown; errors?: unknown };
+  if (Array.isArray(e?.errors) && e.errors.some(isAlreadySubmitted)) return true;
+  return Number(e?.statusCode) === 409;
+}
+
 export async function submitTransaction(signedCborHex: string): Promise<string> {
   if (!signedCborHex) throw new TypeError('submitTransaction: signedCborHex required');
   await ensureInit();
   return od.getCardanoClient().submitTransaction(signedCborHex);
+}
+
+/** Submit and classify the answer by core's typed errors (409 already submitted, 400/422 rejected). */
+export async function trySubmit(signedCborHex: string): Promise<SubmitOutcome> {
+  try {
+    await submitTransaction(signedCborHex);
+    return { kind: 'accepted' };
+  } catch (err) {
+    if (isAlreadySubmitted(err)) return { kind: 'accepted' };
+    const reason = String((err as Error)?.message ?? err).slice(0, 300);
+    return isRejection(err) ? { kind: 'rejected', reason } : { kind: 'unknown', reason };
+  }
 }
 
 /**
@@ -220,6 +320,8 @@ export interface ParsedTxOutput {
   datumHash: string | null;
   inlineDatumHex: string | null;
   referenceScriptHex: string | null;
+  /** Byte length of the serialized output. */
+  cborSize?: number;
 }
 
 /** Structured shape returned by `@odatano/core`'s `parseTransaction`. */
@@ -236,6 +338,16 @@ export interface ParsedTx {
   mint: Array<{ unit: string; quantity: string }>;
   requiredSigners: string[];
   scriptDataHash: string | null;
+  /** Body field 15: 1 mainnet, 0 testnet, null when absent. */
+  networkId?: number | null;
+  /** The transaction's validity flag; false declares a failing script. */
+  isValid: boolean;
+  withdrawals?: Array<{ rewardAddress: string; lovelace: string }>;
+  certificates?: Array<{ index: number; type: string }>;
+  votingProcedures?: number;
+  proposalProcedures?: number;
+  /** Lovelace, decimal string. */
+  treasuryDonation?: string | null;
   witnesses: {
     vkeyCount: number;
     nativeScripts: number;
@@ -295,6 +407,57 @@ export function plutusScriptHash(scriptHex: string, version: 'plutusV2' | 'plutu
     throw new X402Error(Codes.BRIDGE_UNAVAILABLE, '@odatano/core does not export plutusScriptHash (need >= 2.0.0-rc.30)');
   }
   return odScripts.plutusScriptHash(scriptHex, version);
+}
+
+// ─── Slot <-> wall clock (pure, delegated to core) ────────────────────
+
+type CoreNetwork = 'mainnet' | 'preprod' | 'preview';
+
+const odTime = od as unknown as {
+  posixToSlot?: (network: CoreNetwork, posixMs: number) => number;
+  slotToPosixMs?: (network: CoreNetwork, slot: number) => number;
+};
+
+function coreNetwork(network: string): CoreNetwork {
+  return network.replace(/^cardano:/, '') as CoreNetwork;
+}
+
+/** Slot of a wall-clock time, from system start and era history. */
+export function posixToSlot(network: string, posixMs: number): number {
+  if (typeof odTime.posixToSlot !== 'function') {
+    throw new X402Error(Codes.BRIDGE_UNAVAILABLE, '@odatano/core does not export posixToSlot');
+  }
+  return odTime.posixToSlot(coreNetwork(network), posixMs);
+}
+
+/** Wall-clock time (POSIX ms) of a slot. */
+export function slotToPosixMs(network: string, slot: number): number {
+  if (typeof odTime.slotToPosixMs !== 'function') {
+    throw new X402Error(Codes.BRIDGE_UNAVAILABLE, '@odatano/core does not export slotToPosixMs');
+  }
+  return odTime.slotToPosixMs(coreNetwork(network), slot);
+}
+
+// ─── Witness signatures (pure, delegated to core) ────────────────────
+
+/** Every vkey signature checked against the body hash. */
+export interface TxWitnessVerification {
+  valid: boolean;
+  txBodyHash: string | null;
+  /** blake2b-224 of each vkey whose signature verifies. */
+  signerKeyHashes: string[];
+  errors: string[];
+}
+
+const odWitnesses = od as unknown as {
+  verifyTxWitnesses?: (signedTxCbor: string) => TxWitnessVerification;
+};
+
+export function verifyTxWitnesses(signedTxCborHex: string): TxWitnessVerification {
+  if (typeof odWitnesses.verifyTxWitnesses !== 'function') {
+    throw new X402Error(Codes.BRIDGE_UNAVAILABLE, '@odatano/core does not export verifyTxWitnesses');
+  }
+  return odWitnesses.verifyTxWitnesses(signedTxCborHex);
 }
 
 // ─── Server-side unsigned transfer build (delegated to core) ──────────

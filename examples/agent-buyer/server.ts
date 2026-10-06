@@ -26,8 +26,11 @@ import { z } from 'zod';
 import {
   x402Fetch,
   createBridgePayHandler,
+  readPaymentRequired,
+  readSettlement,
   bridge,
-  type PaymentRequirementEntry,
+  type PaymentRequired,
+  type PaymentRequirements,
 } from '@odatano/x402';
 import { loadWallet, createSignTx } from './wallet';
 
@@ -49,7 +52,7 @@ function text(result: unknown) {
 
 async function probe(url: string): Promise<
   | { status: 'free' | 'error'; httpStatus: number; body: string }
-  | { status: 'payment_required'; offer: PaymentRequirementEntry }
+  | { status: 'payment_required'; offer: PaymentRequirements; required: PaymentRequired }
 > {
   const res = await fetch(url);
   if (res.status !== 402) {
@@ -59,10 +62,10 @@ async function probe(url: string): Promise<
       body: (await res.text()).slice(0, 500),
     };
   }
-  const body = await res.json() as { accepts?: PaymentRequirementEntry[] };
-  const offer = body.accepts?.[0];
-  if (!offer) throw new Error('402 response carried no accepts[] entry');
-  return { status: 'payment_required', offer };
+  const required = readPaymentRequired(res.headers.get('PAYMENT-REQUIRED'));
+  const offer = required?.accepts[0];
+  if (!required || !offer) throw new Error('402 response carried no valid PAYMENT-REQUIRED header');
+  return { status: 'payment_required', offer, required };
 }
 
 const server = new McpServer({ name: 'x402-agent-buyer', version: '0.1.0' });
@@ -79,7 +82,7 @@ server.registerTool(
   async ({ url }) => {
     const p = await probe(url);
     if (p.status !== 'payment_required') return text(p);
-    const { offer } = p;
+    const { offer, required } = p;
     return text({
       status: 'payment_required',
       priceLovelace: offer.asset === 'lovelace' ? offer.amount : null,
@@ -87,7 +90,7 @@ server.registerTool(
       asset: offer.asset,
       network: offer.network,
       payTo: offer.payTo,
-      description: offer.resource?.description ?? null,
+      description: required.resource.description ?? null,
       withinBudget:
         offer.asset === 'lovelace' &&
         BigInt(offer.amount) <= MAX_PRICE &&
@@ -140,15 +143,11 @@ server.registerTool(
       });
     }
 
-    let receipt: { transaction: string } | null = null;
     const paidFetch = x402Fetch({ pay: payHandler, errorOnFailure: true });
     const res = await paidFetch(url);
 
-    const receiptB64 = res.headers.get('X-PAYMENT-RESPONSE');
-    if (receiptB64) {
-      receipt = JSON.parse(Buffer.from(receiptB64, 'base64').toString('utf8'));
-    }
-    const txHash = receipt?.transaction ?? null;
+    const receipt = readSettlement(res.headers.get('PAYMENT-RESPONSE'));
+    const txHash = receipt?.success ? receipt.transaction : null;
     if (txHash) {
       spent += price;
       purchases.push({ url, priceLovelace: price.toString(), txHash });

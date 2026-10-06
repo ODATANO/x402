@@ -13,12 +13,13 @@
  * `receipts: { entity: 'my.namespace.MyTable' }`, the table needs to
  * carry the columns we INSERT below.
  *
- * Idempotency: txHash carries `@assert.unique`. A duplicate INSERT
+ * Idempotency: txHash is unique in the entity. A duplicate INSERT
  * (e.g. settle returning twice for the same buyer) hits a unique-key
  * violation and we log + continue. Buyers' UX is unaffected.
  */
 
 import cds from '@sap/cds';
+import { runDetached } from '../helpers/db';
 import type { PaymentClaim } from '../core/types';
 
 const log = cds.log('x402');
@@ -27,14 +28,9 @@ const log = cds.log('x402');
 export const DEFAULT_RECEIPTS_ENTITY = 'odatano.x402.X402Receipts';
 
 /**
- * Insert one receipt for an accepted payment. Returns a promise that
- * always resolves (never throws), errors are logged.
- *
- * The `route` argument is the resource URL the buyer paid for, the same
- * value embedded in `accepts[0].resource.url`. We pass it explicitly
- * rather than re-deriving it inside this module so the persisted route
- * matches what the 402 advertised, even when the consumer set a custom
- * `resourceUrl` builder.
+ * Insert one receipt for a settled payment, in a transaction of its own.
+ * Never throws; errors are logged. `route` is the resource URL the 402
+ * advertised.
  */
 export async function persistReceipt(
   entityName: string,
@@ -42,8 +38,8 @@ export async function persistReceipt(
   route: string,
 ): Promise<void> {
   try {
-    await INSERT.into(entityName).entries({
-      ID:        cds.utils.uuid(),
+    await runDetached(cds.ql.INSERT.into(entityName).entries({
+      id:        cds.utils.uuid(),
       txHash:    claim.txHash,
       payerAddr: claim.payerAddr ?? null,
       payTo:     claim.payTo,
@@ -53,20 +49,11 @@ export async function persistReceipt(
       route,
       nonceRef:  claim.nonceRef,
       at:        new Date().toISOString(),
-    });
+    }));
   } catch (err) {
     log.warn(
       `x402 receipts INSERT into ${entityName} failed (non-fatal):`,
       (err as { message?: string })?.message ?? err,
     );
   }
-}
-
-/** Resolve the entity name from the `receipts` option. */
-export function resolveReceiptsEntity(
-  receipts: boolean | { entity?: string } | undefined,
-): string | null {
-  if (!receipts) return null;
-  if (receipts === true) return DEFAULT_RECEIPTS_ENTITY;
-  return receipts.entity ?? DEFAULT_RECEIPTS_ENTITY;
 }

@@ -28,7 +28,7 @@ export class PricesService extends cds.ApplicationService {
 }
 ```
 
-When a payment is accepted, the verified `PaymentClaim` is stashed on `req.payment` for downstream handlers, and an `X-PAYMENT-RESPONSE` header is set on the response.
+The gate verifies the payment before your handler runs and stashes the verified `PaymentClaim` on `req.payment`. After the handler's transaction committed it settles; the response carries a `PAYMENT-RESPONSE` header. A handler error is never settled. A failed or pending settlement turns the response into a 402; what the handler wrote stays committed, and the buyer's retry runs the handler again, so gated handlers should be safe to repeat. Register the gate before handlers that use the database: on a single-connection database (SQLite) the gate's own records need the connection free.
 
 ## 2. Express middleware (`x402Middleware`)
 
@@ -47,7 +47,9 @@ app.use('/api/premium', x402Middleware({
 
 ## 3. Programmatic: verify a post-paid tx
 
-For subscription or pre-paid flows where the buyer hands you a tx hash:
+Not part of x402: for subscription or pre-paid flows where the buyer
+submitted a payment on its own and hands you the tx hash. Replay
+protection is your job here (e.g. redeem each hash once).
 
 ```typescript
 import { verifyConfirmedPayment } from '@odatano/x402';
@@ -63,7 +65,7 @@ const result = await verifyConfirmedPayment({
 if (result.ok) {
   // result.amountUnits is what was actually paid (may exceed requiredAmount)
 } else {
-  // result.code: 'pending' | 'wrong_asset' | 'insufficient_amount' | ...
+  // result.code: a reason code from `Codes`, e.g. Codes.INSUFFICIENT_AMOUNT
 }
 ```
 
@@ -72,27 +74,26 @@ if (result.ok) {
 When the buyer's CIP-30 wallet can sign but not coin-select:
 
 ```typescript
-import { buildUnsignedPaymentTx, buildPaymentRequirements, flatRequirements } from '@odatano/x402';
+import { buildUnsignedPaymentTx, encodePaymentPayload } from '@odatano/x402';
 
-const body = buildPaymentRequirements({
-  amount: '1000000', asset: 'lovelace',
-  payTo, network: 'cardano:preprod',
-  resource: { url: '/r', description: '', mimeType: 'application/json' },
-});
-const requirements = flatRequirements(body);
-
-const { unsignedTxCborHex, txHashHex, nonceRef } = await buildUnsignedPaymentTx({
+// `requirement` is the accepts[] entry the browser chose from PAYMENT-REQUIRED.
+const { unsignedTxCborHex, nonceRef } = await buildUnsignedPaymentTx({
   buyerBech32: 'addr_test1...buyer...',
-  requirements,
+  requirements: requirement,
 });
 
-// Browser signs unsignedTxCborHex via CIP-30, then assembles the
-// PAYMENT-SIGNATURE envelope with `nonceRef` as payload.nonce.
+// The browser signs unsignedTxCborHex via CIP-30 and sends
+// encodePaymentPayload({ paymentRequired, accepted: requirement, signedTxCborHex, nonceRef })
+// as PAYMENT-SIGNATURE.
 ```
+
+The TTL stays within `maxTimeoutSeconds`. A lovelace amount below the
+output's min-UTxO is refused (the amount is the output coin); a native
+asset output gets its min-ADA added by `@odatano/core`.
 
 ## 5. Client-side: auto-handle 402 (`x402Fetch` / `x402Axios`)
 
-For *callers* of an x402-gated API. The wrapper detects the 402, runs your `pay` handler, and retries the request with a valid `PAYMENT-SIGNATURE` header. Your call-site stays one line.
+For *callers* of an x402-gated API. On a 402 the wrapper reads `PAYMENT-REQUIRED`, picks an `accepts[]` entry, runs your `pay` handler, and retries with `PAYMENT-SIGNATURE`. A 402 whose `PAYMENT-RESPONSE` says `settlement_pending` is answered by re-sending the same header (never by paying again). Your call-site stays one line.
 
 ```typescript
 import { x402Fetch, createBridgePayHandler } from '@odatano/x402';
@@ -120,7 +121,7 @@ const client = x402Axios(axios.create({ baseURL: '...' }), {
 await client.get('/odata/v4/prices/Quotes');
 ```
 
-The `PayHandler` is the one extension point. Write your own to plug in browser CIP-30 wallets, hardware wallets, or external signers. `createBridgePayHandler` is the default for Node and server-to-server flows, leveraging `buildUnsignedPaymentTx` under the hood.
+The `PayHandler` is the one extension point: `(requirement, paymentRequired) => { signedTxCborHex, nonceRef }`. Write your own for browser CIP-30 wallets, hardware wallets or external signers. `createBridgePayHandler` is the default for Node and server-to-server flows, using `buildUnsignedPaymentTx`. The default `selectAccepts` takes the first entry with a supported transfer method (`default`, `script`) and the `authorization` payment flow.
 
 ### Client-side errors (`X402PaymentError`)
 
@@ -140,9 +141,10 @@ try {
   if (err instanceof X402PaymentError) {
     switch (err.kind) {
       case 'pay_handler_failed':   /* wallet rejection, err.cause = original */ break;
-      case 'server_rejected':       /* server returned 402; err.code = canonical code */ break;
-      case 'retries_exhausted':     /* tried maxRetries times, still 402 */ break;
-      case 'invalid_402_body':      /* server replied 402 but body was malformed */ break;
+      case 'server_rejected':          /* server returned 402; err.code = reason code */ break;
+      case 'retries_exhausted':        /* tried maxRetries times, still 402 */ break;
+      case 'invalid_payment_required': /* 402 without a valid PAYMENT-REQUIRED header */ break;
+      case 'settlement_pending':       /* paid, not confirmed in time: retry later, do not pay again */ break;
     }
     console.log(err.code, err.serverError, err.accepts);
   }
@@ -154,10 +156,11 @@ Shape:
 | Field        | Type                        | Notes |
 |--------------|-----------------------------|-------|
 | `kind`       | `X402PaymentErrorKind`      | discriminator (see above) |
-| `code`       | `string?`                   | canonical `X402Code` parsed from `serverError` when present |
-| `accepts`    | `PaymentRequirementEntry[]?`| `accepts[]` from the 402 body so callers can retry against a different option |
+| `code`       | `string?`                   | reason code: `PAYMENT-RESPONSE.errorReason`, else parsed from `serverError` |
+| `accepts`    | `PaymentRequirements[]?`    | `accepts[]` of the 402, to retry against a different option |
+| `settlement` | `SettlementResponse?`       | `PAYMENT-RESPONSE` of a failed or pending settlement |
 | `httpStatus` | `number?`                   | usually `402` |
-| `serverError`| `string?`                   | raw `error` field of the 402 body |
+| `serverError`| `string?`                   | `PaymentRequired.error` |
 | `cause`      | `unknown?`                  | original wallet / signer / axios error when wrapped |
 
 **`errorOnFailure: true`** (default `false`) switches behaviour on unrecovered 402:
@@ -169,9 +172,9 @@ Shape:
 
 ## Facilitator: local vs hosted
 
-Verify+settle is the chain-touching workhorse of x402. By default it runs **in-process** in the same Node that serves your CAP/Express app, via `localFacilitator()`. That means each resource server needs `@odatano/core` configured against a Cardano backend.
+Verify and settle touch the chain. By default they run **in-process** via `localFacilitator()`, so the resource server needs `@odatano/core` configured against a Cardano backend.
 
-For multi-tenant deployments, you can split this out: a single **hosted facilitator** serves many resource servers over HTTP. The resource servers don't carry `@odatano/core` at all; they delegate verify+settle via `httpFacilitator()`.
+A **hosted facilitator** serves many resource servers over HTTP with the x402 v2 facilitator API (`POST /verify`, `POST /settle`, `GET /supported`). `httpFacilitator()` talks to any conformant one, `createFacilitatorRouter()` serves one. The resource server then needs `@odatano/core` installed for decoding, but no Cardano backend.
 
 ```typescript
 // Resource server: no Cardano backend needed locally.
@@ -186,14 +189,17 @@ app.use('/api/premium', x402Middleware({
 }));
 ```
 
-See [`facilitator-protocol.md`](facilitator-protocol.md) for the full HTTP wire format and a reference Express implementation. The same `Facilitator` interface lets you swap in a mock for deterministic tests:
+See [`facilitator-protocol.md`](facilitator-protocol.md) for the API and serving one. The `Facilitator` interface also lets you swap in a mock for deterministic tests:
 
 ```typescript
 const mock: Facilitator = {
-  verifyAndSettle: async () => ({ kind: 'accepted', txHash: 'a...', payment, paymentResponseB64: '...' }),
+  verify: async () => ({ isValid: true, payer: 'addr_test1...' }),
+  settle: async (_payload, req) => ({ success: true, transaction: 'ab...', network: req.network }),
 };
 gateService(this, { ...opts, facilitator: mock });
 ```
+
+A facilitator holds the settlement claims that prevent a payment from being delivered twice. Gates without a `facilitator` option share one per process (`defaultFacilitator()`); if you create your own with `localFacilitator()`, create it once and pass it to every gate. Several instances serving the same payees share the claims through `localFacilitator({ store: cdsSettlementStore() })` or the `settlements: true` option of `gateService`.
 
 ---
 
@@ -204,23 +210,23 @@ gateService(this, { ...opts, facilitator: mock });
 | Option | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `payTo` | `string` (bech32) | yes | - | Recipient address |
-| `network` | `'cardano:mainnet' \| 'cardano:preprod' \| 'cardano:preview'` | yes | - | **v2 uses colon separator** (v1 hyphen rejected) |
+| `network` | `'cardano:mainnet' \| 'cardano:preprod' \| 'cardano:preview'` | yes | - | CIP-34 forms (`cip34:0-1`, ...) are accepted and normalized |
 | `asset` | `string` | yes | - | `'lovelace'` for ADA, or `'<policyIdHex>.<assetNameHex>'` for native tokens |
 | `priceUnits` | `PriceSpec` | one of priceUnits / routePricing | - | Single price (scalar, `RouteOption`, or `RouteOption[]` for multi-accept) for everything under the mount |
-| `routePricing` | `Record<string, PriceSpec> \| PriceResolver` | one of priceUnits / routePricing | - | Per-entity / per-action prices, OR a dynamic resolver `(ctx) => PriceSpec \| null`. Resolver returning `null` skips the gate. Static-map unmapped keys fall back to `priceUnits` |
+| `routePricing` | `Record<string, PriceSpec> \| PriceResolver` | one of priceUnits / routePricing | - | Per-entity / per-action prices, OR a dynamic resolver `(ctx) => PriceSpec \| null`. Resolver returning `null` skips the gate. Static-map unmapped keys fall back to `priceUnits`. A resolver must return the same requirements on the paid retry |
 | `skipPaths` | `RegExp` | no | matches `$metadata`, `$batch`, root, `/index` | Express only. Paths to bypass |
-| `description` | `string` | no | `''` | Embedded in `accepts[0].resource.description` |
-| `mimeType` | `string` | no | `'application/json'` | Embedded in `accepts[0].resource.mimeType` |
-| `maxTimeoutSeconds` | `number` | no | `600` | Buyer-side TTL hint |
-| `extra` | `PaymentExtra` | no | - | `assetTransferMethod` (absent = `'default'`) plus free-form extras (decimals, fingerprint, UI hints). See [Script transfers](#script-transfers-escrow-locks) |
-| `settlePollBudgetMs` | `number` | no | `60_000` | How long to poll for chain confirmation before returning `402 pending` |
-| `allowNoTtl` | `boolean` | no | `false` | If `true`, accept txs with no validity-range upper bound |
-| `onAccepted` | `(claim, req) => void \| Promise<void>` | no | - | Audit callback. Errors logged, never block response |
-| `verifyTransfer` | `(ctx) => { ok: true } \| { ok: false; reason } ` (sync or async) | no | - | Own check on the payment tx before the facilitator runs, e.g. the inline datum of a script lock. Rejection → `402 transfer_rejected`; a throw → `500` |
-| `resourceUrl` | `(req) => string` | no (CAP only) | derives from `req.http.req.originalUrl` | Override the resource URL emitted in the 402 body |
-| `facilitator` | `Facilitator` | no | `localFacilitator()` | Pluggable verify+settle. Pass `httpFacilitator({ url, apiKey })` for hosted, or any custom impl for mocks |
-| `receipts` | `boolean \| { entity?: string }` | no (CAP only) | `false` | Persist accepted payments to a CDS entity. `true` uses the shipped `odatano.x402.X402Receipts`; pass `{ entity }` for a custom table |
-| `grants` | `boolean \| { ttlSeconds?: number; entity?: string }` | no (CAP only) | `false` | Issue time-limited access grants on accepted payment. Buyer's `X-PAYMENT-GRANT` header bypasses the gate until expiry. Default TTL 3600s, default entity `odatano.x402.X402Grants` |
+| `description`, `mimeType`, `serviceName`, `tags`, `iconUrl` | `ResourceInfo` fields | no | `mimeType` `'application/json'` | Describe the route in `PaymentRequired.resource` |
+| `maxTimeoutSeconds` | `number` | no | `600` | Upper bound of the payment tx's TTL |
+| `extra` | `PaymentExtra` | no | - | `assetTransferMethod` (absent = `'default'`) plus free-form extras. See [Script transfers](#script-transfers-escrow-locks) |
+| `confirmationPolicy` | `{ l1Confirmations: number }` | no | `{ l1Confirmations: 1 }` | Chain evidence settle waits for: -1 broadcast (facilitator opt-in), 0 in a block, n newer blocks |
+| `extensions` | `Record<string, unknown>` | no | - | `PaymentRequired.extensions`, echoed by buyers |
+| `onAccepted` | `(claim, req) => void \| Promise<void>` | no | - | Audit callback after settlement. Errors logged, never block the response |
+| `verifyTransfer` | `(ctx) => { ok: true } \| { ok: false; reason }` (sync or async) | no | - | Own check on the verified payment tx before the handler runs, e.g. the inline datum of a script lock. Rejection → `402 transfer_rejected`; a throw → `500` |
+| `resourceUrl` | `(req) => string` | no (CAP only) | derives from `req.http.req.originalUrl` | Override `PaymentRequired.resource.url` |
+| `facilitator` | `Facilitator` | no | process-wide `defaultFacilitator()` | Pluggable verify and settle. `httpFacilitator({ url, apiKey })` for a hosted one, or a mock |
+| `settlements` | `boolean \| { entity?: string }` | no (CAP only) | `false` | Keep settlement claims in `odatano.x402.X402Settlements` (or `{ entity }`) so several instances share them. Default facilitator only |
+| `receipts` | `boolean \| { entity?: string }` | no (CAP only) | `false` | Persist settled payments. `true` uses the shipped `odatano.x402.X402Receipts`; pass `{ entity }` for a custom table |
+| `grants` | `boolean \| { ttlSeconds?: number; entity?: string }` | no (CAP only) | `false` | Server policy, not x402: after a settled payment, the buyer's `X-PAYMENT-GRANT` token skips payment for the route until expiry. Default TTL 3600s, entity `odatano.x402.X402Grants` |
 
 ### `PriceSpec` and `PriceResolver`
 
@@ -228,15 +234,13 @@ gateService(this, { ...opts, facilitator: mock });
 type PriceSpec =
   | string | number | bigint   // shorthand: single price in the default asset
   | RouteOption                // single price with per-option overrides
-  | RouteOption[];             // multi-accept; buyer picks one implicitly on-chain
+  | RouteOption[];             // multi-accept; the buyer names its choice in `accepted`
 
 interface RouteOption {
   amount: string | number | bigint;
   asset?: string;              // override the top-level default asset
   payTo?: string;              // override the top-level recipient
   network?: Network | string;
-  description?: string;
-  mimeType?: string;
   maxTimeoutSeconds?: number;
   extra?: PaymentExtra;        // replaces the top-level extra, not merged
 }
@@ -268,14 +272,12 @@ gateService(this, {
 ```
 
 Native-asset prices (like the USDM entry) can be arbitrarily small, the
-payment output carries its own min-ADA on top. A lovelace price below
-Cardano's min-UTxO (~0.98 ADA) makes the buyer pay the min-UTxO instead:
-`buildUnsignedPaymentTx` raises the output, which still passes check 3.
-Other clients may refuse such a price.
+payment output carries its own min-ADA on top. Lovelace prices below
+Cardano's min-UTxO (~0.98 ADA) are unpayable: the amount is the output
+coin, and clients refuse to build an output the ledger would reject.
 
-The buyer picks one implicitly by which `(payTo, asset)` the payment tx
-actually credits; the facilitator's `pickRequirement()` selects the
-matching entry before running the strict per-entry checks.
+The buyer names the entry it pays in `PaymentPayload.accepted`; the
+server matches it exactly against the offered entries.
 
 #### Dynamic-pricing example , free tier + per-role price
 
@@ -309,6 +311,9 @@ gateService(this, {
   payTo:   escrowAddress,              // address of the script below
   network: 'cardano:preprod',
   asset:   'lovelace',
+  // The datum differs per request, so the paid retry is matched against
+  // what the 402 offered instead of being priced again.
+  issuedRequirements: memoryIssuedRequirementsStore(),
   routePricing: async (ctx) => ({
     amount: '5000000',
     extra: {
@@ -333,7 +338,7 @@ Parameter types are `bytes` (hex), `string` (UTF-8), `integer` /
 `bigint` and `boolean`, each applied as PlutusData. If both `script` and
 `scriptHash` are given they must agree. Plutus V2 and V3 only.
 
-The facilitator checks on top of the six mandatory checks:
+The facilitator checks on top of the verification rules:
 
 - `payTo` is the address of the declared script → else `script_address_mismatch`.
 - `extra.datum` set → an output to `payTo` carries an inline datum → else `datum_missing`.
@@ -343,7 +348,7 @@ The facilitator checks on top of the six mandatory checks:
 Whether the datum suits your contract is not checked: only your contract
 knows. A wrong datum can strand the buyer's funds. `verifyTransfer` is
 the place for anything beyond "the lock carries `extra.datum`".
-`buildEntry` refuses a `script` extra whose script does not match
+`buildRequirements` refuses a `script` extra whose script does not match
 `payTo`, or whose `datum` is not CBOR PlutusData. The accepted claim
 carries `extra.lockRefs`, the `<txHash>#<index>` of every locked output.
 
@@ -351,11 +356,18 @@ On the buyer side, the default `selectAccepts` takes the first entry with
 method `default` or `script`. `buildUnsignedPaymentTx` and
 `createBridgePayHandler` build the lock: they check the entry like the
 facilitator does, write `extra.datum` byte for byte as the inline datum,
-and let `@odatano/core` raise the output to its min-ADA.
+and add min-ADA for native-asset outputs; a lovelace amount must clear
+the output's min-UTxO itself, which a datum raises.
+
+Requirements that differ per request need `issuedRequirements`: the
+buyer's `accepted` is matched exactly, so without the store a fresh
+datum on the paid retry would not match. The in-process store suits a
+single instance; several instances need a shared implementation of
+`IssuedRequirementsStore`.
 
 #### Receipts persistence (`receipts`)
 
-`gateService` can write one row per accepted payment to a CDS entity.
+`gateService` can write one row per settled payment to a CDS entity.
 The plugin ships the canonical entity in `db/x402-receipts.cds`, CAP
 auto-discovers it when `@odatano/x402` is in `node_modules`.
 
@@ -372,7 +384,7 @@ Default entity shape (`odatano.x402.X402Receipts`):
 | Field      | Type        | Notes |
 |------------|-------------|-------|
 | `ID`       | `UUID`      | primary key |
-| `txHash`   | `String(64)`| lowercase hex, `@assert.unique` |
+| `txHash`   | `String(64)`| lowercase hex, unique |
 | `payerAddr`| `String(120)`| nullable; the nonce UTxO's address (the buyer's own input), resolved by the facilitator since 0.5.2, null when the backend could not read it |
 | `payTo`    | `String(120)`| bech32 recipient |
 | `asset`    | `String(120)`| `'lovelace'` or `'<policy>.<nameHex>'` |
@@ -414,7 +426,7 @@ Client flow:
 
 ```text
 1.  GET /Quotes
-    → 402 + accepts[0]
+    → 402 + PAYMENT-REQUIRED
 2.  GET /Quotes  PAYMENT-SIGNATURE: <envelope>
     → 200 + X-PAYMENT-GRANT: <token>  X-PAYMENT-GRANT-EXPIRES: <ISO>
 3.  GET /Quotes  X-PAYMENT-GRANT: <token>      ← bypass; no chain calls

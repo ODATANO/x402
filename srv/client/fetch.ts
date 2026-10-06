@@ -1,26 +1,22 @@
 /**
- * `x402Fetch`, drop-in fetch wrapper that auto-handles 402 responses.
+ * `x402Fetch`, drop-in fetch wrapper that pays 402 responses (x402 v2, HTTP).
  *
- * On a 402 response the wrapper:
- *   1. Parses the body as a v2 `PaymentRequirementsBody`.
- *   2. Picks an `accepts[]` entry (via `selectAccepts`, default = first).
- *   3. Calls the user's `pay` handler to get `{ signedTxCborHex, nonceRef }`.
- *   4. Encodes a `PAYMENT-SIGNATURE` envelope.
- *   5. Retries the original request with the header attached.
+ * On a 402 the wrapper:
+ *   1. reads `PaymentRequired` from the `PAYMENT-REQUIRED` header,
+ *   2. picks an `accepts[]` entry (`selectAccepts`),
+ *   3. calls the `pay` handler for the signed tx and nonce,
+ *   4. retries with `PAYMENT-SIGNATURE` (`accepted`, `resource`, `extensions` echoed).
  *
- * Non-402 responses are passed through untouched. After `maxRetries`
- * payment attempts, the last response (whether 402 or other) is
- * returned to the caller, never an infinite loop.
- *
- * Native fetch is used by default (Node ≥18, all modern browsers).
- * Pass `opts.fetch` to override (testing, custom agents, etc.).
+ * A 402 whose `PAYMENT-RESPONSE` says `settlement_pending` is answered by
+ * re-sending the same header, never by paying again. After `maxRetries`
+ * payments the last response is returned (or thrown under `errorOnFailure`).
  */
 
-import { encodePaymentEnvelope } from './envelope';
-import { X402PaymentError, paymentErrorFromBody } from './errors';
-import type { X402ClientOptions } from './types';
-import type { PaymentRequirementsBody } from '../core/types';
+import { X402PaymentError, paymentErrorFrom } from './errors';
+import { encodePaymentPayload, isSettlementPending, readPaymentRequired, readSettlement } from './protocol';
 import { selectFirstSupported } from './select';
+import type { X402ClientOptions } from './types';
+import type { PaymentRequired } from '../core/types';
 
 type FetchFn = typeof globalThis.fetch;
 
@@ -29,17 +25,13 @@ export interface X402FetchOptions extends X402ClientOptions {
   fetch?: FetchFn;
 }
 
-/**
- * Wrap `fetch` with 402-handling. The returned function has the same
- * signature as native fetch, so it's a drop-in replacement.
- */
 export function x402Fetch(opts: X402FetchOptions): FetchFn {
   if (typeof opts?.pay !== 'function') {
     throw new TypeError('x402Fetch: opts.pay must be a function');
   }
   const baseFetch: FetchFn = opts.fetch ?? globalThis.fetch;
   if (typeof baseFetch !== 'function') {
-    throw new TypeError('x402Fetch: no fetch implementation available (Node ≥18 or pass opts.fetch)');
+    throw new TypeError('x402Fetch: no fetch implementation available (Node >= 18 or pass opts.fetch)');
   }
 
   const maxRetries     = opts.maxRetries ?? 1;
@@ -50,136 +42,78 @@ export function x402Fetch(opts: X402FetchOptions): FetchFn {
   return async function paidFetch(input, init) {
     let attemptsLeft = maxRetries;
     let pendingLeft  = pendingRetries;
-    // True once a PAYMENT-SIGNATURE has been attached, i.e. we paid.
-    let paid = false;
-    // Contextual typing from FetchFn means we don't need to spell out
-    // RequestInfo / RequestInit explicitly, those are DOM-only globals.
     let nextInit = init;
-    // Remember the last parsed 402 body so retries_exhausted carries
-    // the same diagnostic shape as a fresh server_rejected.
-    let lastBody: PaymentRequirementsBody | undefined;
+    let lastRequired: PaymentRequired | undefined;
 
-    // Loop: original request + up-to-maxRetries payment retries.
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
+    for (;;) {
       const res = await baseFetch(input, nextInit);
       if (res.status !== 402) return res;
 
-      // ─── Settlement pending: retry the SAME envelope ────────────────
-      // After we paid, the server may answer 402 with `pending: true`
-      // (tx submitted but not yet indexed). The v2 contract is to
-      // re-send the same PAYMENT-SIGNATURE, NOT to pay again: each
-      // server attempt blocks in its settle poll until the tx lands.
-      if (paid && pendingLeft > 0) {
-        let pendingBody: PaymentRequirementsBody & { pending?: boolean } | undefined;
-        try {
-          pendingBody = await res.clone().json() as PaymentRequirementsBody & { pending?: boolean };
-        } catch { /* not JSON → fall through to normal handling */ }
-        if (pendingBody?.pending === true && pendingBody.x402Version === 2) {
-          lastBody = pendingBody;
+      const paymentRequired = readPaymentRequired(res.headers.get('PAYMENT-REQUIRED'));
+      const settlement = readSettlement(res.headers.get('PAYMENT-RESPONSE'));
+      if (paymentRequired) lastRequired = paymentRequired;
+
+      if (isSettlementPending(settlement)) {
+        if (pendingLeft > 0) {
           pendingLeft--;
           await new Promise(r => setTimeout(r, pendingDelayMs));
           continue;
         }
-      } else if (paid && pendingLeft <= 0) {
-        // Pending re-sends exhausted: the buyer HAS paid but the tx
-        // never became visible within our budget.
-        let pendingBody: PaymentRequirementsBody & { pending?: boolean } | undefined;
-        try {
-          pendingBody = await res.clone().json() as PaymentRequirementsBody & { pending?: boolean };
-        } catch { /* fall through */ }
-        if (pendingBody?.pending === true) {
-          if (opts.errorOnFailure) {
-            throw paymentErrorFromBody(pendingBody, { kind: 'settlement_pending', httpStatus: res.status });
-          }
-          return res;
+        if (opts.errorOnFailure) {
+          throw paymentErrorFrom(lastRequired, { kind: 'settlement_pending', httpStatus: res.status, ...(settlement ? { settlement } : {}) });
         }
+        return res;
       }
 
       if (attemptsLeft <= 0) {
         if (opts.errorOnFailure) {
-          // Use the last successfully-parsed 402 body if we have one
-          // (we typically do, since the prior attempt parsed it). If
-          // not, parse one more time to give the caller a useful error.
-          let body = lastBody;
-          if (!body) {
-            try {
-              body = await res.clone().json() as PaymentRequirementsBody;
-            } catch { /* fall through */ }
-          }
-          if (body) {
-            throw paymentErrorFromBody(body, { kind: 'retries_exhausted', httpStatus: res.status });
-          }
+          throw paymentErrorFrom(lastRequired, { kind: 'retries_exhausted', httpStatus: res.status, ...(settlement ? { settlement } : {}) });
+        }
+        return res;
+      }
+
+      if (!paymentRequired || paymentRequired.accepts.length === 0) {
+        if (opts.errorOnFailure) {
           throw new X402PaymentError({
-            message:    'x402Fetch: retries exhausted with no parsable 402 body',
-            kind:       'retries_exhausted',
+            message:    'x402Fetch: 402 without a valid PAYMENT-REQUIRED header',
+            kind:       'invalid_payment_required',
             httpStatus: res.status,
           });
         }
         return res;
       }
 
-      // Parse 402 body. If it's not a v2 PaymentRequirementsBody we
-      // bail with the original response (or throw under errorOnFailure).
-      let body: PaymentRequirementsBody | undefined;
-      try {
-        body = await res.clone().json() as PaymentRequirementsBody;
-      } catch {
-        if (opts.errorOnFailure) {
-          throw new X402PaymentError({
-            message:    'x402Fetch: 402 body was not JSON',
-            kind:       'invalid_402_body',
-            httpStatus: res.status,
-          });
-        }
-        return res;
-      }
-      if (!body || body.x402Version !== 2 || !Array.isArray(body.accepts) || body.accepts.length === 0) {
-        if (opts.errorOnFailure) {
-          throw new X402PaymentError({
-            message:    'x402Fetch: 402 body is not a v2 PaymentRequirementsBody',
-            kind:       'invalid_402_body',
-            httpStatus: res.status,
-          });
-        }
-        return res;
-      }
-      lastBody = body;
-
-      const chosen = select(body.accepts);
+      const chosen = select(paymentRequired.accepts);
       if (!chosen) {
         if (opts.errorOnFailure) {
-          throw paymentErrorFromBody(body, { kind: 'server_rejected', httpStatus: res.status });
+          throw paymentErrorFrom(paymentRequired, { kind: 'server_rejected', httpStatus: res.status });
         }
         return res;
       }
 
-      // Invoke user's pay handler. Wallet rejection / signer errors /
-      // network blips here all surface as X402PaymentError(pay_handler_failed)
-      // with the original error on `.cause`, regardless of errorOnFailure.
-      let payResult;
+      // Pay-handler errors are always wrapped, regardless of errorOnFailure.
+      let paid;
       try {
-        payResult = await opts.pay(chosen);
+        paid = await opts.pay(chosen, paymentRequired);
       } catch (err) {
         throw new X402PaymentError({
           message: `x402Fetch: pay handler failed: ${(err as { message?: string })?.message ?? String(err)}`,
           kind:    'pay_handler_failed',
-          accepts: body.accepts,
+          accepts: paymentRequired.accepts,
           cause:   err,
         });
       }
-      const header = encodePaymentEnvelope({
-        network:         chosen.network,
-        signedTxCborHex: payResult.signedTxCborHex,
-        nonceRef:        payResult.nonceRef,
+      const header = encodePaymentPayload({
+        paymentRequired,
+        accepted:        chosen,
+        signedTxCborHex: paid.signedTxCborHex,
+        nonceRef:        paid.nonceRef,
       });
 
-      // Merge PAYMENT-SIGNATURE into headers without mutating caller's init.
-      const mergedHeaders = new Headers(nextInit?.headers ?? init?.headers);
-      mergedHeaders.set('PAYMENT-SIGNATURE', header);
-      nextInit = { ...(nextInit ?? init ?? {}), headers: mergedHeaders };
-
-      paid = true;
+      // Copy headers so the caller's init is never mutated.
+      const headers = new Headers(nextInit?.headers ?? init?.headers);
+      headers.set('PAYMENT-SIGNATURE', header);
+      nextInit = { ...(nextInit ?? init ?? {}), headers };
       attemptsLeft--;
     }
   };

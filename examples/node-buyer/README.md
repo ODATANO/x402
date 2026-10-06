@@ -13,7 +13,7 @@ fastest way to see the full 402 → pay → 200 round-trip in a terminal.
    from `@odatano/core` (UTxO selection, change, fee), the vkey witness
    is attached locally with `Tx.signWith`.
 3. `x402Fetch` doing the 402 → pay → retry loop transparently.
-4. Decoding `X-PAYMENT-RESPONSE` for the settled tx hash.
+4. Decoding `PAYMENT-RESPONSE` for the settled tx hash.
 
 ## Quick start
 

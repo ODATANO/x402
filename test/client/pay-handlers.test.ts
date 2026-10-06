@@ -16,19 +16,19 @@ import { buildUnsignedPaymentTx } from '../../srv/helpers/build-unsigned-tx';
 import {
   BUYER_ADDR, SELLER_ADDR, NONCE_REF, NETWORK_PREPROD,
 } from '../fixtures/constants';
-import type { PaymentRequirementEntry } from '../../srv/core/types';
+import type { PaymentRequired, PaymentRequirements } from '../../srv/core/types';
 
 const mocked = buildUnsignedPaymentTx as jest.MockedFunction<typeof buildUnsignedPaymentTx>;
 
-const REQ: PaymentRequirementEntry = {
-  scheme:              'exact',
-  network:             NETWORK_PREPROD,
-  asset:               'lovelace',
-  amount:              '1000000',
-  payTo:               SELLER_ADDR,
-  resource:            { url: '/foo', description: 'X', mimeType: 'application/json' },
-  maxTimeoutSeconds:   600,
+const REQ: PaymentRequirements = {
+  scheme:            'exact',
+  network:           NETWORK_PREPROD,
+  asset:             'lovelace',
+  amount:            '1000000',
+  payTo:             SELLER_ADDR,
+  maxTimeoutSeconds: 600,
 };
+const REQUIRED: PaymentRequired = { x402Version: 2, resource: { url: '/foo' }, accepts: [REQ] };
 
 beforeEach(() => mocked.mockReset());
 
@@ -45,7 +45,7 @@ describe('createBridgePayHandler', () => {
     const signTx = jest.fn(async (cbor: string) => cbor + 'cafe');
 
     const handler = createBridgePayHandler({ buyerBech32: BUYER_ADDR, signTx });
-    const r = await handler(REQ);
+    const r = await handler(REQ, REQUIRED);
 
     expect(mocked).toHaveBeenCalledWith(expect.objectContaining({
       buyerBech32:  BUYER_ADDR,
@@ -55,7 +55,7 @@ describe('createBridgePayHandler', () => {
     expect(r).toEqual({ signedTxCborHex: 'beef00cafe', nonceRef: NONCE_REF });
   });
 
-  it('forwards ttlSlotsFromNow', async () => {
+  it('forwards ttlSeconds', async () => {
     mocked.mockResolvedValueOnce({
       unsignedTxCborHex: 'aa',
       txHashHex:         'a'.repeat(64),
@@ -65,12 +65,25 @@ describe('createBridgePayHandler', () => {
       ttlSlot:           1,
     });
     const handler = createBridgePayHandler({
-      buyerBech32:     BUYER_ADDR,
-      signTx:          async () => 'aacc',
-      ttlSlotsFromNow: 3600,
+      buyerBech32: BUYER_ADDR,
+      signTx:      async () => 'aacc',
+      ttlSeconds:  120,
     });
-    await handler(REQ);
-    expect(mocked).toHaveBeenCalledWith(expect.objectContaining({ ttlSlotsFromNow: 3600 }));
+    await handler(REQ, REQUIRED);
+    expect(mocked).toHaveBeenCalledWith(expect.objectContaining({ ttlSeconds: 120 }));
+  });
+
+  it('leaves ttlSeconds unset by default', async () => {
+    mocked.mockResolvedValueOnce({
+      unsignedTxCborHex: 'aa',
+      txHashHex:         'a'.repeat(64),
+      requiredSignerHex: 'b'.repeat(56),
+      nonceRef:          NONCE_REF,
+      inputs:            [],
+      ttlSlot:           1,
+    });
+    await createBridgePayHandler({ buyerBech32: BUYER_ADDR, signTx: async () => 'aacc' })(REQ, REQUIRED);
+    expect(mocked.mock.calls[0]![0]).not.toHaveProperty('ttlSeconds');
   });
 
   it('rejects if signTx returns a non-string', async () => {
@@ -86,7 +99,7 @@ describe('createBridgePayHandler', () => {
       buyerBech32: BUYER_ADDR,
       signTx:      async () => '' as unknown as string,
     });
-    await expect(handler(REQ)).rejects.toThrow(/non-empty hex string/);
+    await expect(handler(REQ, REQUIRED)).rejects.toThrow(/non-empty hex string/);
   });
 
   it('throws on missing buyerBech32', () => {

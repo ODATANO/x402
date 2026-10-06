@@ -22,11 +22,13 @@ in `cds.requires`, so the key must stay out of `package.json`,
 
 | Method | Path                | Auth          | Purpose                       |
 |--------|---------------------|---------------|-------------------------------|
-| POST   | `/v1/verify-settle` | Bearer apiKey | Full verify+settle pipeline   |
-| GET    | `/v1/supported`     | Bearer apiKey | Discovery: networks / methods |
+| POST   | `/v1/verify`        | Bearer apiKey | Verify a payment (read-only)  |
+| POST   | `/v1/settle`        | Bearer apiKey | Submit and confirm a payment  |
+| GET    | `/v1/supported`     | Bearer apiKey | Supported kinds               |
 | GET    | `/v1/healthz`       | (open)        | Liveness probe                |
 
-Wire format: see [`docs/facilitator-protocol.md`](../../docs/facilitator-protocol.md).
+The x402 v2 facilitator API, so any x402 v2 resource server can use it.
+Details: [`docs/facilitator-protocol.md`](../../docs/facilitator-protocol.md).
 
 ## Use from a resource server
 

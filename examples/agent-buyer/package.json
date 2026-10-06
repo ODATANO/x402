@@ -10,7 +10,7 @@
   "dependencies": {
     "@harmoniclabs/buildooor": "^0.2.6",
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@odatano/core": "^2.0.0-rc.30",
+    "@odatano/core": "2.0.0-rc.31",
     "@odatano/x402": "*",
     "@sap/cds": "^9",
     "express": "^4",

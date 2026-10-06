@@ -4,6 +4,15 @@ All notable changes to `@odatano/x402` are documented here. The format follows [
 
 **Pre-1.0 caveat:** minor versions may include breaking changes until `1.0.0`.
 
+## [0.6.1] - 2026-10-06
+
+### Changed
+- **Peer `@odatano/core` >= 2.0.0-rc.31.** Without a database, core no longer logs `db.begin is not a function` on `initialize()` nor a failed local UTxO lookup on every build.
+
+### Internal
+- `@odatano/core` pinned to `2.0.0-rc.31` in devDependencies and examples.
+- `.env` excluded from the npm package.
+
 ## [0.6.0] - 2026-10-06
 
 ### Breaking

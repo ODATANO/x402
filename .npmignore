@@ -34,4 +34,6 @@ x402-cardano-integration.md
 # --- Examples & local artifacts ---
 examples/
 local_docs/
+.env
+.env.*
 *.tgz
